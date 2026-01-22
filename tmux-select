@@ -1,5 +1,5 @@
 #!/bin/zsh
-# tmux-select - Sélecteur global de sessions tmux
+# tmux-select - Global tmux session selector
 # Usage: ts
 
 show_menu() {
@@ -13,9 +13,9 @@ show_menu() {
     echo ""
 
     if [[ -z "$sessions" ]]; then
-        echo " Aucune session active."
+        echo " No active sessions."
         echo ""
-        echo " Créer une session:"
+        echo " Create a session:"
         echo " ──────────────────"
         echo "   c-kommu    c-devlens   c-formation"
         echo "   c-dent     c-gluten    c-resonant"
@@ -25,7 +25,7 @@ show_menu() {
         return 1
     fi
 
-    echo " Sessions actives:"
+    echo " Active sessions:"
     echo " ─────────────────"
 
     declare -g -a sess_names
@@ -49,11 +49,12 @@ show_menu() {
     echo ""
     echo " Actions:"
     echo " ────────"
-    echo "   D) 🗑️  Supprimer une session"
-    echo "   K) 💀 Supprimer TOUTES les sessions"
-    echo "   C) 🧹 Clean RAM & caches système"
-    echo "   R) 🔄 Rafraîchir"
-    echo "   Q) ❌ Quitter"
+    echo "   D) 🗑️  Delete a session"
+    echo "   K) 💀 Delete ALL sessions"
+    echo "   C) 🧹 Clean RAM & caches (safe, keeps Claude data)"
+    echo "   X) ☢️  NUCLEAR (kill sessions + clean caches)"
+    echo "   R) 🔄 Refresh"
+    echo "   Q) ❌ Quit"
     echo ""
     echo -n " ➤ "
     return 0
@@ -76,22 +77,22 @@ while true; do
             if [[ $idx -le ${#sess_names[@]} ]]; then
                 sess="${sess_names[$idx]}"
                 echo ""
-                echo "🔗 Attachement à $sess..."
+                echo "🔗 Attaching to $sess..."
                 sleep 0.3
                 tmux attach -t "$sess"
                 exit 0
             else
-                echo " ❌ Choix invalide"
+                echo " ❌ Invalid choice"
                 sleep 1
             fi
             ;;
         d|d\ [1-9]|d[1-9])
-            # Extraire le numéro si fourni directement
+            # Extract number if provided directly
             if [[ "$choice_lower" =~ ^d\ ?([0-9]+)$ ]]; then
                 del_choice="${match[1]}"
             else
                 echo ""
-                echo " Quelle session supprimer? (1-${#sess_names[@]})"
+                echo " Which session to delete? (1-${#sess_names[@]})"
                 echo -n " ➤ "
                 read del_choice
             fi
@@ -99,38 +100,39 @@ while true; do
             if [[ "$del_choice" =~ ^[0-9]+$ ]] && [[ $del_choice -le ${#sess_names[@]} ]] && [[ $del_choice -ge 1 ]]; then
                 sess="${sess_names[$del_choice]}"
                 tmux kill-session -t "$sess" 2>/dev/null
-                echo " ✓ Session $sess supprimée"
+                echo " ✓ Session $sess deleted"
                 sleep 1
             else
-                echo " ❌ Choix invalide"
+                echo " ❌ Invalid choice"
                 sleep 1
             fi
             ;;
         k)
             echo ""
-            echo " ⚠️  Supprimer TOUTES les sessions? (oui/non)"
+            echo " ⚠️  Delete ALL sessions? (y/n)"
             echo -n " ➤ "
             read confirm
             confirm_lower="${confirm:l}"
-            if [[ "$confirm_lower" == "oui" || "$confirm_lower" == "o" || "$confirm_lower" == "y" ]]; then
+            if [[ "$confirm_lower" == "y" || "$confirm_lower" == "yes" ]]; then
                 tmux kill-server 2>/dev/null
-                echo " ✓ Toutes les sessions supprimées"
+                echo " ✓ All sessions deleted"
                 sleep 1
                 exit 0
             else
-                echo " Annulé."
+                echo " Cancelled."
                 sleep 1
             fi
             ;;
         c)
             echo ""
-            echo " 🧹 Nettoyage système..."
+            echo " 🧹 System cleanup..."
+            echo " ⚠️  SAFE: Keeps ~/.claude/ (conversations, history, config)"
             echo ""
 
-            # RAM avant
+            # RAM before
             ram_before=$(free -m | awk '/^Mem:/{print $3}')
 
-            # Tuer les process node zombies (pas attachés à tmux)
+            # Kill orphan node processes (not attached to tmux)
             zombies=$(pgrep -f "node" | while read pid; do
                 if ! tmux list-panes -a -F '#{pane_pid}' 2>/dev/null | grep -q "^$pid$"; then
                     parent=$(ps -o ppid= -p $pid 2>/dev/null | tr -d ' ')
@@ -141,40 +143,96 @@ while true; do
             done)
             if [[ -n "$zombies" ]]; then
                 echo "$zombies" | xargs kill -9 2>/dev/null
-                echo " ✓ Process node orphelins tués"
+                echo " ✓ Orphan node processes killed"
             fi
 
-            # Vider les caches npm/bun globaux
-            npm cache clean --force 2>/dev/null && echo " ✓ npm cache nettoyé"
-            bun pm cache rm 2>/dev/null && echo " ✓ bun cache nettoyé"
+            # Clear global npm/bun caches
+            npm cache clean --force 2>/dev/null && echo " ✓ npm cache cleaned"
+            bun pm cache rm 2>/dev/null && echo " ✓ bun cache cleaned"
 
-            # Drop caches système (nécessite sudo)
+            # Drop system caches (requires sudo)
             sync
-            echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 && echo " ✓ RAM libérée (drop_caches)"
+            echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 && echo " ✓ RAM freed (drop_caches)"
 
-            # RAM après
+            # RAM after
             ram_after=$(free -m | awk '/^Mem:/{print $3}')
             ram_freed=$((ram_before - ram_after))
 
             echo ""
-            echo " 📊 Résultat:"
-            free -h | awk '/^Mem:/{printf "    RAM: %s utilisé / %s total\n", $3, $2}'
+            echo " 📊 Result:"
+            free -h | awk '/^Mem:/{printf "    RAM: %s used / %s total\n", $3, $2}'
             if [[ $ram_freed -gt 0 ]]; then
-                echo "    Libéré: ${ram_freed}MB"
+                echo "    Freed: ${ram_freed}MB"
             fi
-            df -h / | tail -1 | awk '{print "    Disque: "$3" / "$2" ("$5")"}'
+            df -h / | tail -1 | awk '{print "    Disk: "$3" / "$2" ("$5")"}'
+            echo ""
+            echo " 🛡️  PRESERVED: ~/.claude/ (all conversations & config)"
             echo ""
             sleep 3
             ;;
+        x|kkc)
+            echo ""
+            echo " ☢️  NUCLEAR - Delete ALL sessions + clean caches? (y/n)"
+            echo " 🛡️  SAFE: ~/.claude/ will NOT be touched"
+            echo -n " ➤ "
+            read confirm
+            confirm_lower="${confirm:l}"
+            if [[ "$confirm_lower" == "y" || "$confirm_lower" == "yes" ]]; then
+                echo ""
+                echo " 💀 Killing ALL tmux sessions..."
+                tmux kill-server 2>/dev/null
+                echo " ✓ All sessions deleted"
+
+                echo ""
+                echo " 🧹 Cleaning system..."
+                ram_before=$(free -m | awk '/^Mem:/{print $3}')
+
+                # Kill orphan node processes
+                zombies=$(pgrep -f "node" | while read pid; do
+                    parent=$(ps -o ppid= -p $pid 2>/dev/null | tr -d ' ')
+                    if [[ "$parent" == "1" ]]; then
+                        echo $pid
+                    fi
+                done)
+                if [[ -n "$zombies" ]]; then
+                    echo "$zombies" | xargs kill -9 2>/dev/null
+                    echo " ✓ Orphan node processes killed"
+                fi
+
+                # Clear caches
+                npm cache clean --force 2>/dev/null && echo " ✓ npm cache cleaned"
+                bun pm cache rm 2>/dev/null && echo " ✓ bun cache cleaned"
+
+                # Drop RAM
+                sync
+                echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 && echo " ✓ RAM freed"
+
+                ram_after=$(free -m | awk '/^Mem:/{print $3}')
+                ram_freed=$((ram_before - ram_after))
+
+                echo ""
+                echo " ☢️  NUCLEAR complete!"
+                echo " 📊 Result:"
+                free -h | awk '/^Mem:/{printf "    RAM: %s used / %s total\n", $3, $2}'
+                [[ $ram_freed -gt 0 ]] && echo "    Freed: ${ram_freed}MB"
+                df -h / | tail -1 | awk '{print "    Disk: "$3" / "$2" ("$5")"}'
+                echo ""
+                sleep 2
+                exit 0
+            else
+                echo " Cancelled."
+                sleep 1
+            fi
+            ;;
         r)
-            # Rafraîchir - la boucle va réafficher
+            # Refresh - loop will redisplay
             ;;
         q|"")
             echo " Bye!"
             exit 0
             ;;
         *)
-            echo " ❌ Choix invalide"
+            echo " ❌ Invalid choice"
             sleep 1
             ;;
     esac
