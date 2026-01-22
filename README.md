@@ -68,6 +68,38 @@ A powerful tmux session manager with interactive menus, designed for developers 
  ➤
 ```
 
+### Home Control Center (`c-home`)
+```
+╔══════════════════════════════════════════════════════════╗
+║  🏠 HOME - Control Center                                ║
+╚══════════════════════════════════════════════════════════╝
+
+ Home Sessions:
+ ──────────────
+   1) Home  │ 1 win
+
+ Other active sessions: 3
+   • MyProject
+   • Backend
+   • Frontend
+
+ Actions:
+ ────────
+   N) ➕ New Home session
+   D) 🗑️  Delete a Home session
+
+ Global Actions:
+ ───────────────
+   C) 🧹 Clean cache ALL projects + RAM (safe, keeps Claude data)
+   X) 💀 Kill ALL Claude Code processes
+   K) ⚠️  Close ALL other sessions (keeps Home)
+  KK) ☢️  NUCLEAR: Close ALL (sessions + Claude) except Home
+
+   Q) ❌ Cancel
+
+ ➤
+```
+
 ### Status Bar
 ```
 [ Session ] ─────────────── CC: 45% │ RAM: 62% │ CPU: 12% │ Disk: 71% [ Agentik_OS ]
@@ -121,6 +153,14 @@ c-myproject
 ts
 ```
 
+### Home Control Center
+
+A special session for global management - clean all projects, kill all Claude processes, etc.
+
+```bash
+c-home
+```
+
 ### Quick List
 
 ```bash
@@ -155,6 +195,19 @@ All commands are **case insensitive** (works with `d` or `D`).
 | `C` | Clean RAM & system caches (SAFE) |
 | `X` / `KKC` | **NUCLEAR** - kill all + clean everything |
 | `R` | Refresh list |
+| `Q` | Quit |
+
+### In Home Control Center (`c-home`)
+
+| Key | Action |
+|-----|--------|
+| `1-9` | Attach to Home session |
+| `N` | Create new Home session |
+| `D` | Delete a Home session |
+| `C` | Clean ALL projects caches + RAM (SAFE) |
+| `X` | Kill ALL Claude Code processes (confirm: `y`) |
+| `K` | Close ALL other sessions, keep Home (confirm: `y`) |
+| `KK` | **NUCLEAR** - close all sessions + kill Claude, keep Home |
 | `Q` | Quit |
 
 ## 🧹 What Gets Cleaned
@@ -229,6 +282,7 @@ The scripts are written for `zsh` but can be adapted for `bash`:
 |------|----------|
 | `tmux-project` | `~/.local/bin/tmux-project` |
 | `tmux-select` | `~/.local/bin/tmux-select` |
+| `tmux-home` | `~/.local/bin/tmux-home` |
 | `tmux.conf` | `~/.tmux.conf` |
 | Status scripts | `~/.tmux/scripts/` |
 | Aliases | `~/.zshrc` or `~/.bashrc` |
