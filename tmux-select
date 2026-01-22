@@ -1,0 +1,181 @@
+#!/bin/zsh
+# tmux-select - Sélecteur global de sessions tmux
+# Usage: ts
+
+show_menu() {
+    sessions=$(tmux ls 2>/dev/null)
+
+    clear
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  🖥️  Tmux Session Manager"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+
+    if [[ -z "$sessions" ]]; then
+        echo " Aucune session active."
+        echo ""
+        echo " Créer une session:"
+        echo " ──────────────────"
+        echo "   c-kommu    c-devlens   c-formation"
+        echo "   c-dent     c-gluten    c-resonant"
+        echo "   c-life     c-saga      c-vision"
+        echo "   c-agentik  c-home"
+        echo ""
+        return 1
+    fi
+
+    echo " Sessions actives:"
+    echo " ─────────────────"
+
+    declare -g -a sess_names
+    sess_names=()
+    i=1
+    while IFS= read -r line; do
+        name=$(echo "$line" | cut -d: -f1)
+        sess_names+=("$name")
+        wins=$(tmux list-windows -t "$name" 2>/dev/null | wc -l)
+        path=$(tmux display-message -t "$name" -p '#{pane_current_path}' 2>/dev/null | sed "s|$HOME|~|")
+        created=$(tmux display-message -t "$name" -p '#{session_created}' 2>/dev/null)
+        if [[ -n "$created" ]]; then
+            created_fmt=$(date -d "@$created" "+%d/%m %H:%M" 2>/dev/null || echo "")
+        else
+            created_fmt=""
+        fi
+        printf "   %d) %-15s │ %d win │ %s │ %s\n" "$i" "$name" "$wins" "$created_fmt" "$path"
+        ((i++))
+    done <<< "$sessions"
+
+    echo ""
+    echo " Actions:"
+    echo " ────────"
+    echo "   D) 🗑️  Supprimer une session"
+    echo "   K) 💀 Supprimer TOUTES les sessions"
+    echo "   C) 🧹 Clean RAM & caches système"
+    echo "   R) 🔄 Rafraîchir"
+    echo "   Q) ❌ Quitter"
+    echo ""
+    echo -n " ➤ "
+    return 0
+}
+
+while true; do
+    show_menu
+    menu_result=$?
+
+    if [[ $menu_result -eq 1 ]]; then
+        exit 0
+    fi
+
+    read choice
+    choice_lower="${choice:l}"
+
+    case "$choice_lower" in
+        [1-9])
+            idx=$((choice_lower))
+            if [[ $idx -le ${#sess_names[@]} ]]; then
+                sess="${sess_names[$idx]}"
+                echo ""
+                echo "🔗 Attachement à $sess..."
+                sleep 0.3
+                tmux attach -t "$sess"
+                exit 0
+            else
+                echo " ❌ Choix invalide"
+                sleep 1
+            fi
+            ;;
+        d|d\ [1-9]|d[1-9])
+            # Extraire le numéro si fourni directement
+            if [[ "$choice_lower" =~ ^d\ ?([0-9]+)$ ]]; then
+                del_choice="${match[1]}"
+            else
+                echo ""
+                echo " Quelle session supprimer? (1-${#sess_names[@]})"
+                echo -n " ➤ "
+                read del_choice
+            fi
+
+            if [[ "$del_choice" =~ ^[0-9]+$ ]] && [[ $del_choice -le ${#sess_names[@]} ]] && [[ $del_choice -ge 1 ]]; then
+                sess="${sess_names[$del_choice]}"
+                tmux kill-session -t "$sess" 2>/dev/null
+                echo " ✓ Session $sess supprimée"
+                sleep 1
+            else
+                echo " ❌ Choix invalide"
+                sleep 1
+            fi
+            ;;
+        k)
+            echo ""
+            echo " ⚠️  Supprimer TOUTES les sessions? (oui/non)"
+            echo -n " ➤ "
+            read confirm
+            confirm_lower="${confirm:l}"
+            if [[ "$confirm_lower" == "oui" || "$confirm_lower" == "o" || "$confirm_lower" == "y" ]]; then
+                tmux kill-server 2>/dev/null
+                echo " ✓ Toutes les sessions supprimées"
+                sleep 1
+                exit 0
+            else
+                echo " Annulé."
+                sleep 1
+            fi
+            ;;
+        c)
+            echo ""
+            echo " 🧹 Nettoyage système..."
+            echo ""
+
+            # RAM avant
+            ram_before=$(free -m | awk '/^Mem:/{print $3}')
+
+            # Tuer les process node zombies (pas attachés à tmux)
+            zombies=$(pgrep -f "node" | while read pid; do
+                if ! tmux list-panes -a -F '#{pane_pid}' 2>/dev/null | grep -q "^$pid$"; then
+                    parent=$(ps -o ppid= -p $pid 2>/dev/null | tr -d ' ')
+                    if [[ "$parent" == "1" ]]; then
+                        echo $pid
+                    fi
+                fi
+            done)
+            if [[ -n "$zombies" ]]; then
+                echo "$zombies" | xargs kill -9 2>/dev/null
+                echo " ✓ Process node orphelins tués"
+            fi
+
+            # Vider les caches npm/bun globaux
+            npm cache clean --force 2>/dev/null && echo " ✓ npm cache nettoyé"
+            bun pm cache rm 2>/dev/null && echo " ✓ bun cache nettoyé"
+
+            # Drop caches système (nécessite sudo)
+            sync
+            echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 && echo " ✓ RAM libérée (drop_caches)"
+
+            # RAM après
+            ram_after=$(free -m | awk '/^Mem:/{print $3}')
+            ram_freed=$((ram_before - ram_after))
+
+            echo ""
+            echo " 📊 Résultat:"
+            free -h | awk '/^Mem:/{printf "    RAM: %s utilisé / %s total\n", $3, $2}'
+            if [[ $ram_freed -gt 0 ]]; then
+                echo "    Libéré: ${ram_freed}MB"
+            fi
+            df -h / | tail -1 | awk '{print "    Disque: "$3" / "$2" ("$5")"}'
+            echo ""
+            sleep 3
+            ;;
+        r)
+            # Rafraîchir - la boucle va réafficher
+            ;;
+        q|"")
+            echo " Bye!"
+            exit 0
+            ;;
+        *)
+            echo " ❌ Choix invalide"
+            sleep 1
+            ;;
+    esac
+done

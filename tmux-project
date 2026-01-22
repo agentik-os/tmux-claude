@@ -1,0 +1,235 @@
+#!/bin/zsh
+# tmux-project - Gestion intelligente des sessions tmux par projet
+# Usage: tmux-project <nom_session> <chemin_projet> [--no-claude]
+
+SESSION_NAME="$1"
+PROJECT_PATH="$2"
+NO_CLAUDE="$3"
+
+if [[ -z "$SESSION_NAME" || -z "$PROJECT_PATH" ]]; then
+    echo "Usage: tmux-project <nom_session> <chemin_projet> [--no-claude]"
+    exit 1
+fi
+
+# Commande à lancer dans la session
+if [[ "$NO_CLAUDE" == "--no-claude" ]]; then
+    SESSION_CMD=""
+else
+    SESSION_CMD="claude --dangerously-skip-permissions"
+fi
+
+# Fonction pour créer une session
+create_session() {
+    local name="$1"
+    if [[ -n "$SESSION_CMD" ]]; then
+        tmux new-session -d -s "$name" -c "$PROJECT_PATH" "$SESSION_CMD"
+    else
+        tmux new-session -d -s "$name" -c "$PROJECT_PATH"
+    fi
+}
+
+# Fonction pour trouver le prochain numéro disponible
+next_number() {
+    local base="$1"
+    local max=0
+    for s in $(tmux ls 2>/dev/null | grep -E "^${base}(-[0-9]+)?:" | cut -d: -f1); do
+        if [[ "$s" == "$base" ]]; then
+            [[ 1 -gt $max ]] && max=1
+        elif [[ "$s" =~ ^${base}-([0-9]+)$ ]]; then
+            num="${match[1]}"
+            [[ $num -ge $max ]] && max=$((num + 1))
+        fi
+    done
+    [[ $max -eq 0 ]] && echo "" || echo "-$max"
+}
+
+# Lister les sessions existantes pour ce projet
+existing=($(tmux ls 2>/dev/null | grep -E "^${SESSION_NAME}(-[0-9]+)?:" | cut -d: -f1))
+
+# Si aucune session → créer directement
+if [[ ${#existing[@]} -eq 0 ]]; then
+    echo "📁 Création session $SESSION_NAME..."
+    create_session "$SESSION_NAME"
+    tmux attach -t "$SESSION_NAME"
+    exit 0
+fi
+
+# Afficher menu
+show_menu() {
+    clear
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  📂 $SESSION_NAME"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    echo " Sessions actives:"
+    echo " ─────────────────"
+    i=1
+    for s in "${existing[@]}"; do
+        wins=$(tmux list-windows -t "$s" 2>/dev/null | wc -l)
+        created=$(tmux display-message -t "$s" -p '#{session_created}' 2>/dev/null)
+        if [[ -n "$created" ]]; then
+            created_fmt=$(date -d "@$created" "+%d/%m %H:%M" 2>/dev/null || echo "?")
+        else
+            created_fmt="?"
+        fi
+        echo "   $i) $s  │ $wins win │ créée $created_fmt"
+        ((i++))
+    done
+    echo ""
+    echo " Actions:"
+    echo " ────────"
+    echo "   N) ➕ Nouvelle session"
+    echo "   D) 🗑️  Supprimer une session"
+    echo "   K) 💀 Supprimer TOUTES les sessions $SESSION_NAME"
+    echo "   C) 🧹 Clean cache projet"
+    echo "   Q) ❌ Annuler"
+    echo ""
+    echo -n " ➤ "
+}
+
+show_menu
+read choice
+
+# Convertir en minuscule pour comparaison
+choice_lower="${choice:l}"
+
+case "$choice_lower" in
+    [1-9])
+        idx=$((choice_lower))
+        if [[ $idx -le ${#existing[@]} ]]; then
+            sess="${existing[$idx]}"
+            echo ""
+            echo "🔗 Attachement à $sess..."
+            sleep 0.3
+            tmux attach -t "$sess"
+        else
+            echo "❌ Choix invalide"
+        fi
+        ;;
+    n)
+        suffix=$(next_number "$SESSION_NAME")
+        new_name="${SESSION_NAME}${suffix}"
+        echo ""
+        echo "📁 Création $new_name..."
+        create_session "$new_name"
+        sleep 0.3
+        tmux attach -t "$new_name"
+        ;;
+    d|d\ [1-9]|d[1-9])
+        # Extraire le numéro si fourni directement (ex: "d 1" ou "d1")
+        if [[ "$choice_lower" =~ ^d\ ?([0-9]+)$ ]]; then
+            del_choice="${match[1]}"
+        else
+            echo ""
+            echo " Quelle session supprimer?"
+            i=1
+            for s in "${existing[@]}"; do
+                echo "   $i) $s"
+                ((i++))
+            done
+            echo ""
+            echo -n " ➤ "
+            read del_choice
+        fi
+
+        if [[ "$del_choice" =~ ^[0-9]+$ ]] && [[ $del_choice -le ${#existing[@]} ]] && [[ $del_choice -ge 1 ]]; then
+            sess="${existing[$del_choice]}"
+            tmux kill-session -t "$sess" 2>/dev/null
+            echo " ✓ Session $sess supprimée"
+            sleep 1
+            # Relancer le menu si d'autres sessions existent
+            existing=($(tmux ls 2>/dev/null | grep -E "^${SESSION_NAME}(-[0-9]+)?:" | cut -d: -f1))
+            if [[ ${#existing[@]} -gt 0 ]]; then
+                exec "$0" "$SESSION_NAME" "$PROJECT_PATH" "$NO_CLAUDE"
+            else
+                echo ""
+                echo " Plus de session. Créer une nouvelle? (O/N)"
+                echo -n " ➤ "
+                read create
+                create_lower="${create:l}"
+                if [[ "$create_lower" == "o" || "$create_lower" == "y" ]]; then
+                    echo "📁 Création $SESSION_NAME..."
+                    create_session "$SESSION_NAME"
+                    tmux attach -t "$SESSION_NAME"
+                fi
+            fi
+        else
+            echo " ❌ Choix invalide"
+        fi
+        ;;
+    k)
+        echo ""
+        echo " ⚠️  Supprimer TOUTES les sessions $SESSION_NAME? (oui/non)"
+        echo -n " ➤ "
+        read confirm
+        confirm_lower="${confirm:l}"
+        if [[ "$confirm_lower" == "oui" || "$confirm_lower" == "o" || "$confirm_lower" == "y" ]]; then
+            for s in "${existing[@]}"; do
+                tmux kill-session -t "$s" 2>/dev/null
+                echo " ✓ $s supprimée"
+            done
+            echo ""
+            echo " Toutes supprimées. Créer une nouvelle? (O/N)"
+            echo -n " ➤ "
+            read create
+            create_lower="${create:l}"
+            if [[ "$create_lower" == "o" || "$create_lower" == "y" ]]; then
+                echo "📁 Création $SESSION_NAME..."
+                create_session "$SESSION_NAME"
+                tmux attach -t "$SESSION_NAME"
+            fi
+        else
+            echo " Annulé."
+        fi
+        ;;
+    c)
+        echo ""
+        echo " 🧹 Nettoyage du projet $SESSION_NAME..."
+        echo ""
+
+        # Cache npm/bun
+        if [[ -d "$PROJECT_PATH/node_modules/.cache" ]]; then
+            rm -rf "$PROJECT_PATH/node_modules/.cache"
+            echo " ✓ node_modules/.cache supprimé"
+        fi
+
+        # Cache Next.js
+        if [[ -d "$PROJECT_PATH/.next/cache" ]]; then
+            rm -rf "$PROJECT_PATH/.next/cache"
+            echo " ✓ .next/cache supprimé"
+        fi
+
+        # Cache Turbo
+        if [[ -d "$PROJECT_PATH/.turbo" ]]; then
+            rm -rf "$PROJECT_PATH/.turbo"
+            echo " ✓ .turbo supprimé"
+        fi
+
+        # Cache ESLint
+        if [[ -f "$PROJECT_PATH/.eslintcache" ]]; then
+            rm -f "$PROJECT_PATH/.eslintcache"
+            echo " ✓ .eslintcache supprimé"
+        fi
+
+        # Cache TypeScript
+        if [[ -d "$PROJECT_PATH/.tsbuildinfo" ]] || [[ -f "$PROJECT_PATH/tsconfig.tsbuildinfo" ]]; then
+            rm -rf "$PROJECT_PATH/.tsbuildinfo" "$PROJECT_PATH/tsconfig.tsbuildinfo" 2>/dev/null
+            echo " ✓ tsbuildinfo supprimé"
+        fi
+
+        # Taille libérée
+        echo ""
+        echo " 📊 Espace disque:"
+        df -h / | tail -1 | awk '{print "    Utilisé: "$3" / "$2" ("$5")"}'
+        echo ""
+        sleep 2
+        exec "$0" "$SESSION_NAME" "$PROJECT_PATH" "$NO_CLAUDE"
+        ;;
+    q|"")
+        echo " Annulé."
+        ;;
+    *)
+        echo " ❌ Choix invalide"
+        ;;
+esac
