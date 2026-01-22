@@ -12,9 +12,12 @@ A powerful tmux session manager with interactive menus, designed for developers 
 - **📋 Interactive menus** - No need to remember tmux commands
 - **🔢 Smart naming** - Sessions named `Project`, `Project-2`, `Project-3`...
 - **🗑️ Easy cleanup** - Delete one session or all sessions for a project
-- **🧹 Cache cleaning** - Clean project caches (node_modules, .next, etc.)
+- **🧹 Safe cache cleaning** - Clean project caches without touching Claude data
 - **💾 RAM cleaning** - Free up system memory with one command
-- **⌨️ Case insensitive** - `d`, `D`, `delete` all work
+- **☢️ NUCLEAR option** - Kill everything + clean caches in one command
+- **📚 Context refresh** - Init/refresh Claude context for projects
+- **📊 Status bar** - Real-time CPU, RAM, Disk, Claude usage display
+- **🛡️ Claude-safe** - NEVER touches `~/.claude/` or conversation history
 
 ## 📸 Screenshots
 
@@ -24,18 +27,20 @@ A powerful tmux session manager with interactive menus, designed for developers 
 ║  📂 MyProject
 ╚══════════════════════════════════════════════════════════╝
 
- Sessions actives:
+ Active sessions:
  ─────────────────
-   1) MyProject    │ 1 win │ créée 22/01 10:59
-   2) MyProject-2  │ 1 win │ créée 22/01 14:30
+   1) MyProject    │ 1 win │ created 22/01 10:59
+   2) MyProject-2  │ 1 win │ created 22/01 14:30
 
  Actions:
  ────────
-   N) ➕ Nouvelle session
-   D) 🗑️  Supprimer une session
-   K) 💀 Supprimer TOUTES les sessions MyProject
-   C) 🧹 Clean cache projet
-   Q) ❌ Annuler
+   N) ➕ New session
+   D) 🗑️  Delete a session
+   K) 💀 Delete ALL MyProject sessions
+   C) 🧹 Clean project cache (safe, keeps Claude data)
+   I) 📚 Init/refresh Claude context
+   X) ☢️  NUCLEAR (kill all + clean caches)
+   Q) ❌ Cancel
 
  ➤
 ```
@@ -46,20 +51,26 @@ A powerful tmux session manager with interactive menus, designed for developers 
 ║  🖥️  Tmux Session Manager
 ╚══════════════════════════════════════════════════════════╝
 
- Sessions actives:
+ Active sessions:
  ─────────────────
    1) MyProject     │ 1 win │ 22/01 10:56 │ ~/projects/myproject
    2) Backend       │ 2 win │ 21/01 09:12 │ ~/projects/backend
 
  Actions:
  ────────
-   D) 🗑️  Supprimer une session
-   K) 💀 Supprimer TOUTES les sessions
-   C) 🧹 Clean RAM & caches système
-   R) 🔄 Rafraîchir
-   Q) ❌ Quitter
+   D) 🗑️  Delete a session
+   K) 💀 Delete ALL sessions
+   C) 🧹 Clean RAM & caches (safe, keeps Claude data)
+   X) ☢️  NUCLEAR (kill sessions + clean caches)
+   R) 🔄 Refresh
+   Q) ❌ Quit
 
  ➤
+```
+
+### Status Bar
+```
+[ Session ] ─────────────── CC: 45% │ RAM: 62% │ CPU: 12% │ Disk: 71% [ Agentik_OS ]
 ```
 
 ## 🚀 Installation
@@ -128,8 +139,10 @@ All commands are **case insensitive** (works with `d` or `D`).
 | `N` | Create new session |
 | `D` | Delete one session |
 | `D1` / `D 1` | Delete session 1 directly |
-| `K` | Kill ALL sessions for this project |
-| `C` | Clean project caches |
+| `K` | Kill ALL sessions for this project (confirm: `y`) |
+| `C` | Clean project caches (SAFE) |
+| `I` | Init/refresh Claude context |
+| `X` / `KKC` | **NUCLEAR** - kill all + clean everything |
 | `Q` | Quit |
 
 ### In Global Selector (`ts`)
@@ -138,25 +151,49 @@ All commands are **case insensitive** (works with `d` or `D`).
 |-----|--------|
 | `1-9` | Attach to session |
 | `D` | Delete one session |
-| `K` | Kill ALL sessions |
-| `C` | Clean RAM & system caches |
+| `K` | Kill ALL sessions (confirm: `y`) |
+| `C` | Clean RAM & system caches (SAFE) |
+| `X` / `KKC` | **NUCLEAR** - kill all + clean everything |
 | `R` | Refresh list |
 | `Q` | Quit |
 
 ## 🧹 What Gets Cleaned
 
-### Project Clean (`C` in project menu)
+### Project Clean (`C` in project menu) - SAFE
 - `node_modules/.cache`
 - `.next/cache`
 - `.turbo`
 - `.eslintcache`
 - `tsconfig.tsbuildinfo`
 
-### System Clean (`C` in global selector)
+### System Clean (`C` in global selector) - SAFE
 - Orphan Node.js processes
 - npm cache (global)
 - bun cache (global)
 - Linux page cache (RAM)
+
+### 🛡️ NEVER Touched
+- `~/.claude/` (conversations, history, config)
+- Project `.claude/` folders
+- `CLAUDE.md` files
+
+## 📊 Status Bar Scripts
+
+The `scripts/` folder contains status bar scripts for tmux:
+
+| Script | Description |
+|--------|-------------|
+| `ram-usage.sh` | RAM usage percentage |
+| `cpu-usage.sh` | CPU usage percentage |
+| `disk-usage.sh` | Disk usage percentage |
+| `claude-usage.sh` | Claude context usage percentage |
+
+To use them, add to your `tmux.conf`:
+```bash
+set -g status-right '#[fg=white]RAM: #(~/.tmux/scripts/ram-usage.sh) │ CPU: #(~/.tmux/scripts/cpu-usage.sh)'
+```
+
+Or use the included `tmux.conf` for a complete setup.
 
 ## 🔧 Configuration
 
@@ -192,6 +229,8 @@ The scripts are written for `zsh` but can be adapted for `bash`:
 |------|----------|
 | `tmux-project` | `~/.local/bin/tmux-project` |
 | `tmux-select` | `~/.local/bin/tmux-select` |
+| `tmux.conf` | `~/.tmux.conf` |
+| Status scripts | `~/.tmux/scripts/` |
 | Aliases | `~/.zshrc` or `~/.bashrc` |
 
 ## 🤝 Contributing
