@@ -215,45 +215,18 @@ handle_other_sessions() {
     esac
 }
 
-# PURGE mode - aggressive cleanup (Home mode)
-handle_purge() {
-    echo ""
-    echo -e "  ${RED}${BOLD}PURGE MODE${RESET}"
-    echo ""
-    echo -e "  This will:"
-    echo -e "  - Kill ALL Claude processes"
-    echo -e "  - Kill ALL other tmux sessions"
-    echo -e "  - Clean ALL caches (npm, bun)"
-    echo -e "  - Free system RAM"
-    echo ""
-    echo -n "  Confirm PURGE? y/n: "
-    read -r confirm
+# Free RAM - quick memory cleanup
+handle_free_ram() {
+    echo "  Freeing RAM..."
+    sync
+    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
 
-    if [ "$confirm" = "y" ]; then
-        echo ""
-        echo "  [1/5] Killing Claude processes..."
-        pkill -f "claude" 2>/dev/null
-        sleep 1
-
-        echo "  [2/5] Killing other sessions..."
-        get_other_sessions | cut -d'|' -f1 | while read name; do
-            [ -n "$name" ] && tmux kill-session -t "$name" 2>/dev/null
-        done
-
-        echo "  [3/5] Cleaning caches..."
-        npm cache clean --force 2>/dev/null
-        bun pm cache rm 2>/dev/null
-        rm -rf /tmp/claude-* /tmp/bun-* 2>/dev/null
-
-        echo "  [4/5] Freeing RAM..."
-        sync
-        echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
-
-        echo "  [5/5] Done!"
-        echo ""
-        echo -e "  ${GREEN}System purged${RESET}"
-        sleep 2
-    fi
+    # Show result
+    local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local used_pct=$((($total - $available) * 100 / $total))
+    echo -e "  Done. RAM: ${YELLOW}${used_pct}%${RESET}"
+    sleep 1
 }
 
 next_session_name() {
@@ -631,7 +604,7 @@ show_menu() {
         # HOME MODE - different menu
         printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
         printf "  ${YELLOW}o${RESET} %-10s ${YELLOW}b${RESET} %-10s ${YELLOW}u${RESET} %-10s\n" "Others" "Background" "Usage"
-        printf "  ${YELLOW}f${RESET} %-10s ${YELLOW}c${RESET} %-10s ${YELLOW}p${RESET} %-10s\n" "Free RAM" "Clean" "PURGE"
+        printf "  ${YELLOW}f${RESET} %-10s ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s\n" "Free RAM" "Clean" "Nuclear"
     else
         # PROJECT MODE - full menu
         printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
@@ -704,11 +677,8 @@ main() {
                 fi
                 ;;
             p|P)
-                if [ "$NO_CLAUDE" = true ]; then
-                    # PURGE mode for Home
-                    handle_purge
-                else
-                    # Pull for projects with git
+                # Pull for projects with git (not used in Home mode)
+                if [ "$NO_CLAUDE" = false ]; then
                     cd "$PROJECT_PATH" && git pull 2>/dev/null
                     sleep 1
                 fi
@@ -741,11 +711,7 @@ main() {
             f|F)
                 # Free RAM (Home mode)
                 if [ "$NO_CLAUDE" = true ]; then
-                    echo "  Freeing RAM..."
-                    sync
-                    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
-                    echo "  Done"
-                    sleep 1
+                    handle_free_ram
                 fi
                 ;;
             c|C)
