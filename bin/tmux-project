@@ -211,19 +211,6 @@ handle_other_sessions() {
     esac
 }
 
-# Free RAM - quick memory cleanup
-handle_free_ram() {
-    echo "  Freeing RAM..."
-    sync
-    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
-
-    # Show result
-    local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-    local used_pct=$((($total - $available) * 100 / $total))
-    echo -e "  Done. RAM: ${YELLOW}${used_pct}%${RESET}"
-    sleep 1
-}
 
 next_session_name() {
     local count=$(count_sessions)
@@ -566,15 +553,21 @@ show_menu() {
 
     # Stats line
     local stats_line="  RAM $ram ${DIM}|${RESET} CPU $cpu"
-    [ "$port" -gt 0 ] 2>/dev/null && stats_line+=" ${DIM}|${RESET} :$port "
-    case "$dev_status" in
-        running) stats_line+="${GREEN}up${RESET}" ;;
-        listening) stats_line+="${YELLOW}listen${RESET}" ;;
-        stopped) stats_line+="${RED}down${RESET}" ;;
-    esac
-    local bg_num=$(echo "$bg_count" | tr -d '\n' | grep -o '[0-9]*' || echo "0")
-    [ "$bg_num" -gt 0 ] 2>/dev/null && stats_line+=" ${DIM}|${RESET} BG:$bg_num"
-    stats_line+=" ${DIM}|${RESET} Notif:$notify"
+
+    if [ "$NO_CLAUDE" = false ]; then
+        # Project mode: show port and dev status
+        [ "$port" -gt 0 ] 2>/dev/null && stats_line+=" ${DIM}|${RESET} :$port "
+        case "$dev_status" in
+            running) stats_line+="${GREEN}up${RESET}" ;;
+            listening) stats_line+="${YELLOW}listen${RESET}" ;;
+            stopped) stats_line+="${RED}down${RESET}" ;;
+        esac
+        local bg_num=$(echo "$bg_count" | tr -d '\n' | grep -o '[0-9]*' || echo "0")
+        [ "$bg_num" -gt 0 ] 2>/dev/null && stats_line+=" ${DIM}|${RESET} BG:$bg_num"
+        stats_line+=" ${DIM}|${RESET} Notif:$notify"
+    fi
+    # Home mode: just RAM and CPU (no port, no notif)
+
     echo -e "$stats_line"
     echo ""
 
@@ -597,10 +590,12 @@ show_menu() {
     echo ""
 
     if [ "$NO_CLAUDE" = true ]; then
-        # HOME MODE - different menu
+        # HOME MODE - simplified menu
         printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
-        printf "  ${YELLOW}o${RESET} %-10s ${YELLOW}b${RESET} %-10s ${YELLOW}u${RESET} %-10s\n" "Others" "Background" "Usage"
-        printf "  ${YELLOW}f${RESET} %-10s ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s\n" "Free RAM" "Clean" "Nuclear"
+        printf "  ${YELLOW}o${RESET} %-10s ${YELLOW}u${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Others" "Usage" "Quit"
+        printf "  ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s\n" "Clean" "NUCLEAR"
+        echo ""
+        echo -e "  ${DIM}c = RAM + caches | x = kill ALL + clean ALL${RESET}"
     else
         # PROJECT MODE - full menu
         printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
@@ -702,12 +697,6 @@ main() {
                     handle_other_sessions
                 fi
                 ;;
-            f|F)
-                # Free RAM (Home mode)
-                if [ "$NO_CLAUDE" = true ]; then
-                    handle_free_ram
-                fi
-                ;;
             c|C)
                 echo "  Cleaning..."
                 sync
@@ -718,13 +707,31 @@ main() {
                 sleep 1
                 ;;
             x|X)
-                get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {} 2>/dev/null
-                cd "$PROJECT_PATH"
-                rm -rf node_modules/.cache .next/cache .turbo .eslintcache tsconfig.tsbuildinfo 2>/dev/null
-                sync
-                echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
-                echo "  Nuked"
-                sleep 1
+                if [ "$NO_CLAUDE" = true ]; then
+                    # HOME NUCLEAR: kill EVERYTHING
+                    echo "  [1/4] Killing Claude..."
+                    pkill -f "claude" 2>/dev/null
+                    echo "  [2/4] Killing ALL sessions..."
+                    tmux kill-server 2>/dev/null || true
+                    echo "  [3/4] Cleaning caches..."
+                    npm cache clean --force 2>/dev/null
+                    bun pm cache rm 2>/dev/null
+                    rm -rf /tmp/claude-* /tmp/bun-* 2>/dev/null
+                    echo "  [4/4] Freeing RAM..."
+                    sync
+                    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                    echo "  NUKED"
+                    sleep 1
+                else
+                    # PROJECT NUCLEAR: kill project sessions + clean project caches
+                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {} 2>/dev/null
+                    cd "$PROJECT_PATH"
+                    rm -rf node_modules/.cache .next/cache .turbo .eslintcache tsconfig.tsbuildinfo 2>/dev/null
+                    sync
+                    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                    echo "  Nuked"
+                    sleep 1
+                fi
                 ;;
             u|U)
                 clear
