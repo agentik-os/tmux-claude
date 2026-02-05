@@ -1,0 +1,196 @@
+#!/bin/bash
+# tmux-select v3 - Menu CLI clean
+# Usage: ts
+
+YELLOW='\033[1;33m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+categorize() {
+    local path="$1"
+    if [[ "$path" == *"/VibeCoding/work/"* ]]; then
+        echo "work"
+    elif [[ "$path" == *"/VibeCoding/clients/"* ]]; then
+        echo "clients"
+    elif [[ "$path" == *"/VibeCoding/agentic-os/"* ]]; then
+        echo "agentik"
+    elif [[ "$path" == *"/VibeCoding/1-life"* ]]; then
+        echo "life"
+    else
+        echo "system"
+    fi
+}
+
+get_stats() {
+    local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local ram="$((($total - $available) * 100 / $total))%"
+
+    read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+    local cpu_total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+    local cpu_used=$((cpu_total - idle - iowait))
+    local cpu="$((cpu_used * 100 / cpu_total))%"
+
+    echo "$ram|$cpu"
+}
+
+get_branch() {
+    local path="$1"
+    if [ -d "$path/.git" ]; then
+        cd "$path"
+        local branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        local dirty=""
+        [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty="*"
+        echo "${branch}${dirty}"
+    fi
+}
+
+# Attach or switch depending on context
+attach_session() {
+    local name="$1"
+    if [ -n "$TMUX" ]; then
+        # Already inside tmux - switch client
+        tmux switch-client -t "$name"
+    else
+        # Outside tmux - attach
+        tmux attach -t "$name"
+    fi
+}
+
+show_menu() {
+    clear
+    local stats=$(get_stats)
+    local ram=$(echo "$stats" | cut -d'|' -f1)
+    local cpu=$(echo "$stats" | cut -d'|' -f2)
+
+    echo ""
+    echo -e "  ${BOLD}Sessions${RESET} ${DIM}|${RESET} RAM $ram ${DIM}|${RESET} CPU $cpu"
+    echo ""
+
+    local sessions=$(tmux list-sessions -F "#{session_name}|#{session_created}|#{pane_current_path}" 2>/dev/null)
+
+    if [ -z "$sessions" ]; then
+        echo -e "  ${DIM}no active sessions${RESET}"
+        echo ""
+    else
+        local i=1
+        local first_session=""
+        local current_cat=""
+
+        # Sort by category
+        for cat in "work" "clients" "agentik" "life" "system"; do
+            local has_cat=0
+
+            while IFS='|' read -r name created path; do
+                [ -z "$name" ] && continue
+                local sess_cat=$(categorize "$path")
+                [ "$sess_cat" != "$cat" ] && continue
+
+                if [ $has_cat -eq 0 ]; then
+                    echo -e "  ${DIM}$cat${RESET}"
+                    has_cat=1
+                fi
+
+                local time=$(date -d "@$created" "+%H:%M" 2>/dev/null || echo "??:??")
+                local branch=$(get_branch "$path")
+
+                if [ -z "$first_session" ]; then
+                    first_session="$name"
+                fi
+
+                printf "  ${YELLOW}%d${RESET}) %-14s %-10s ${DIM}%s${RESET}\n" "$i" "$name" "$branch" "$time"
+                ((i++))
+            done <<< "$sessions"
+
+            [ $has_cat -eq 1 ] && echo ""
+        done
+
+        echo -e "  ${DIM}Enter: attach $first_session${RESET}"
+        echo "$first_session" > /tmp/ts_first_session
+    fi
+
+    echo ""
+    echo -e "  ${DIM}─────${RESET}"
+    echo ""
+    printf "  ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s ${YELLOW}c${RESET} %-10s\n" "Delete" "Kill all" "Clean RAM"
+    printf "  ${YELLOW}r${RESET} %-10s ${YELLOW}u${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Refresh" "Usage" "Quit"
+    echo ""
+}
+
+main() {
+    while true; do
+        show_menu
+        echo -n "  > "
+        read -r choice
+
+        local first_session=$(cat /tmp/ts_first_session 2>/dev/null)
+        local all_sessions=$(tmux list-sessions -F "#{session_name}" 2>/dev/null)
+
+        case "$choice" in
+            "")
+                if [ -n "$first_session" ]; then
+                    attach_session "$first_session"
+                    exit 0
+                fi
+                ;;
+            [1-9])
+                local target=$(echo "$all_sessions" | sed -n "${choice}p")
+                if [ -n "$target" ]; then
+                    attach_session "$target"
+                    exit 0
+                fi
+                ;;
+            d|D)
+                echo -n "  delete #: "
+                read -r num
+                local target=$(echo "$all_sessions" | sed -n "${num}p")
+                if [ -n "$target" ]; then
+                    tmux kill-session -t "$target"
+                fi
+                ;;
+            k|K)
+                echo -n "  kill all? y/n: "
+                read -r confirm
+                if [ "$confirm" = "y" ]; then
+                    tmux kill-server 2>/dev/null
+                    exit 0
+                fi
+                ;;
+            c|C)
+                sync
+                echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                ;;
+            r|R)
+                ;;
+            u|U)
+                clear
+                echo ""
+                echo -e "  ${BOLD}Usage${RESET}"
+                echo ""
+                local claude_procs=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
+                echo -e "  Claude processes: ${YELLOW}$claude_procs${RESET}"
+                local account="-"
+                if [ -f ~/.claude/.pool-status.json ]; then
+                    account=$(cat ~/.claude/.pool-status.json | jq -r '.current' 2>/dev/null || echo "-")
+                fi
+                echo -e "  Account: ${YELLOW}$account${RESET}"
+                local stats=$(get_stats)
+                echo -e "  RAM: ${YELLOW}$(echo $stats | cut -d'|' -f1)${RESET}"
+                echo -e "  CPU: ${YELLOW}$(echo $stats | cut -d'|' -f2)${RESET}"
+                local ts_count=$(tmux list-sessions 2>/dev/null | wc -l)
+                echo -e "  Tmux sessions: ${YELLOW}$ts_count${RESET}"
+                echo ""
+                echo -e "  ${DIM}For Claude usage: run /usage inside Claude${RESET}"
+                echo ""
+                echo -n "  Press Enter..."
+                read
+                ;;
+            q|Q)
+                exit 0
+                ;;
+        esac
+    done
+}
+
+main

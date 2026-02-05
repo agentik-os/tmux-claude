@@ -1,308 +1,265 @@
-# 🖥️ tmux-claude
+# tmux-claude
 
-> Intelligent tmux session management for Claude Code (or any CLI tool)
+Smart tmux session management for Claude Code and multi-project workflows.
 
-A powerful tmux session manager with interactive menus, designed for developers who work on multiple projects with Claude Code.
+One command per project. Interactive menus. Zero memorization.
 
-![Demo](https://img.shields.io/badge/Shell-ZSH-green) ![License](https://img.shields.io/badge/License-MIT-blue)
-
-## ✨ Features
-
-- **🎯 One command per project** - `c-myproject` opens/manages sessions for that project
-- **📋 Interactive menus** - No need to remember tmux commands
-- **🔢 Smart naming** - Sessions named `Project`, `Project-2`, `Project-3`...
-- **🗑️ Easy cleanup** - Delete one session or all sessions for a project
-- **🧹 Safe cache cleaning** - Clean project caches without touching Claude data
-- **💾 RAM cleaning** - Free up system memory with one command
-- **☢️ NUCLEAR option** - Kill everything + clean caches in one command
-- **📚 Context refresh** - Init/refresh Claude context for projects
-- **📊 Status bar** - Real-time CPU, RAM, Disk, Claude usage display
-- **🛡️ Claude-safe** - NEVER touches `~/.claude/` or conversation history
-
-## 📸 Screenshots
-
-### Project Menu (`c-myproject`)
-```
-╔══════════════════════════════════════════════════════════╗
-║  📂 MyProject
-╚══════════════════════════════════════════════════════════╝
-
- Active sessions:
- ─────────────────
-   1) MyProject    │ 1 win │ created 22/01 10:59
-   2) MyProject-2  │ 1 win │ created 22/01 14:30
-
- Actions:
- ────────
-   N) ➕ New session
-   D) 🗑️  Delete a session
-   K) 💀 Delete ALL MyProject sessions
-   C) 🧹 Clean project cache (safe, keeps Claude data)
-   I) 📚 Init/refresh Claude context
-   X) ☢️  NUCLEAR (kill all + clean caches)
-   Q) ❌ Cancel
-
- ➤
-```
-
-### Global Selector (`ts`)
-```
-╔══════════════════════════════════════════════════════════╗
-║  🖥️  Tmux Session Manager
-╚══════════════════════════════════════════════════════════╝
-
- Active sessions:
- ─────────────────
-   1) MyProject     │ 1 win │ 22/01 10:56 │ ~/projects/myproject
-   2) Backend       │ 2 win │ 21/01 09:12 │ ~/projects/backend
-
- Actions:
- ────────
-   D) 🗑️  Delete a session
-   K) 💀 Delete ALL sessions
-   C) 🧹 Clean RAM & caches (safe, keeps Claude data)
-   X) ☢️  NUCLEAR (kill sessions + clean caches)
-   R) 🔄 Refresh
-   Q) ❌ Quit
-
- ➤
-```
-
-### Home Control Center (`c-home`)
-```
-╔══════════════════════════════════════════════════════════╗
-║  🏠 HOME - Control Center                                ║
-╚══════════════════════════════════════════════════════════╝
-
- Home Sessions:
- ──────────────
-   1) Home  │ 1 win
-
- Other active sessions: 3
-   • MyProject
-   • Backend
-   • Frontend
-
- Actions:
- ────────
-   N) ➕ New Home session
-   D) 🗑️  Delete a Home session
-
- Global Actions:
- ───────────────
-   C) 🧹 Clean cache ALL projects + RAM (safe, keeps Claude data)
-   X) 💀 Kill ALL Claude Code processes
-   K) ⚠️  Close ALL other sessions (keeps Home)
-  KK) ☢️  NUCLEAR: Close ALL (sessions + Claude) except Home
-
-   Q) ❌ Cancel
-
- ➤
-```
-
-### Status Bar
-```
-[ Session ] ─────────────── CC: 45% │ RAM: 62% │ CPU: 12% │ Disk: 71% [ Agentik_OS ]
-```
-
-## 🚀 Installation
-
-### Quick Install (Recommended)
+## Quick Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/agentik-os/tmux-claude/main/install.sh | bash
 ```
 
-### Manual Install
+Or clone and install:
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/agentik-os/tmux-claude.git
 cd tmux-claude
-
-# 2. Run install script
 ./install.sh
-
-# 3. Reload your shell
-source ~/.zshrc  # or ~/.bashrc
 ```
 
-## 📖 Usage
+The installer:
+- Detects your shell (zsh/bash)
+- Scans for projects automatically
+- Creates aliases for each project
+- Sets up tmux status bar
+- Takes about 30 seconds
 
-### Project Sessions
+## Usage
 
-Create an alias for each of your projects in `~/.zshrc`:
+### Global Commands
+
+| Command | Description |
+|---------|-------------|
+| `ts` | Open session selector (all projects) |
+| `tps` | List active sessions |
+| `c-home` | Home directory (shell without Claude) |
+
+### Project Commands
+
+After installation, each project gets an alias:
 
 ```bash
-# With Claude Code (default)
-alias c-myproject='tmux-project MyProject /path/to/myproject'
-
-# Without Claude Code (just shell)
-alias c-home='tmux-project Home /home/user --no-claude'
+c-myproject     # Opens menu for MyProject
+c-backend       # Opens menu for Backend
+c-api           # Opens menu for API
 ```
 
-Then just run:
+### Project Menu
 
-```bash
-c-myproject
+```
+  MyProject
+  main* +2 push:3h
+  RAM 24% | CPU 8% | :3001 up | Notif:off
+
+  1) MyProject    10:59
+  2) MyProject-2  14:30
+
+  ─────
+
+  n New        d Delete     k Kill all
+  p Pull       g Push       s Sync
+  v Dev        i Init       b Background
+  t Notif off  m Multi      u Usage
+  c Clean      x Nuclear    q Quit
 ```
 
-### Global Session Manager
+### Direct Shortcuts
 
-```bash
-ts
+Skip the submenu:
+
+| Shortcut | Action |
+|----------|--------|
+| `n1` | New session + Claude (fresh) |
+| `n2` | New session + Claude (resume) |
+| `n3` | New session (shell only) |
+
+### Session Selector (ts)
+
+```
+  Sessions | RAM 24% | CPU 8%
+
+  work
+  1) Kommu         main*    10:59
+  2) DevLensPro    dev      14:30
+
+  clients
+  3) DentistryGPT  main     09:15
+
+  ─────
+
+  d Delete     k Kill all   c Clean RAM
+  x Nuclear    r Refresh    q Quit
 ```
 
-### Home Control Center
+## Features
 
-A special session for global management - clean all projects, kill all Claude processes, etc.
+### Dev Server Management
 
-```bash
-c-home
-```
+Press `v` to access dev server controls:
+- Start server (foreground or background)
+- Stop server (kill port)
+- Clean cache + restart
+- View logs
 
-### Quick List
+### Git Integration
 
-```bash
-tps  # Shows all active tmux sessions
-```
+- Shows current branch with dirty indicator (*)
+- Shows commits ahead/behind
+- Shows time since last push
+- Quick pull/push/sync commands
 
-## ⌨️ Keyboard Shortcuts
+### Background Tasks
 
-All commands are **case insensitive** (works with `d` or `D`).
+Press `b` to manage Claude background tasks:
+- List running background agents
+- Kill specific tasks by PID
+- Kill all background tasks
 
-### In Project Menu (`c-xxx`)
+### Notifications
 
-| Key | Action |
-|-----|--------|
-| `1-9` | Attach to session |
-| `N` | Create new session |
-| `D` | Delete one session |
-| `D1` / `D 1` | Delete session 1 directly |
-| `K` | Kill ALL sessions for this project (confirm: `y`) |
-| `C` | Clean project caches (SAFE) |
-| `I` | Init/refresh Claude context |
-| `X` / `KKC` | **NUCLEAR** - kill all + clean everything |
-| `Q` | Quit |
+Press `t` to toggle Telegram notifications per project.
 
-### In Global Selector (`ts`)
+### Cache Cleaning
 
-| Key | Action |
-|-----|--------|
-| `1-9` | Attach to session |
-| `D` | Delete one session |
-| `K` | Kill ALL sessions (confirm: `y`) |
-| `C` | Clean RAM & system caches (SAFE) |
-| `X` / `KKC` | **NUCLEAR** - kill all + clean everything |
-| `R` | Refresh list |
-| `Q` | Quit |
+| Action | What it cleans |
+|--------|----------------|
+| `c` (Clean) | System RAM, orphan processes |
+| `x` (Nuclear) | Project caches + RAM + kill sessions |
 
-### In Home Control Center (`c-home`)
-
-| Key | Action |
-|-----|--------|
-| `1-9` | Attach to Home session |
-| `N` | Create new Home session |
-| `D` | Delete a Home session |
-| `C` | Clean ALL projects caches + RAM (SAFE) |
-| `X` | Kill ALL Claude Code processes (confirm: `y`) |
-| `K` | Close ALL other sessions, keep Home (confirm: `y`) |
-| `KK` | **NUCLEAR** - close all sessions + kill Claude, keep Home |
-| `Q` | Quit |
-
-## 🧹 What Gets Cleaned
-
-### Project Clean (`C` in project menu) - SAFE
-- `node_modules/.cache`
-- `.next/cache`
-- `.turbo`
-- `.eslintcache`
-- `tsconfig.tsbuildinfo`
-
-### System Clean (`C` in global selector) - SAFE
-- Orphan Node.js processes
-- npm cache (global)
-- bun cache (global)
-- Linux page cache (RAM)
-
-### 🛡️ NEVER Touched
-- `~/.claude/` (conversations, history, config)
+Never touches:
+- `~/.claude/` (conversations, history)
 - Project `.claude/` folders
-- `CLAUDE.md` files
+- CLAUDE.md files
 
-## 📊 Status Bar Scripts
+## Status Bar
 
-The `scripts/` folder contains status bar scripts for tmux:
+The status bar shows real-time information:
 
-| Script | Description |
-|--------|-------------|
-| `ram-usage.sh` | RAM usage percentage |
-| `cpu-usage.sh` | CPU usage percentage |
-| `disk-usage.sh` | Disk usage percentage |
-| `claude-usage.sh` | Claude context usage percentage |
-
-To use them, add to your `tmux.conf`:
-```bash
-set -g status-right '#[fg=white]RAM: #(~/.tmux/scripts/ram-usage.sh) │ CPU: #(~/.tmux/scripts/cpu-usage.sh)'
+```
+[Pomodoro] Session | TS 3 | BG 0 | push:2h | main*     CC dafnck | RAM 24% | CPU 8% | Disk 45% | Tunnel up
 ```
 
-Or use the included `tmux.conf` for a complete setup.
+Left side (session info):
+- Pomodoro timer
+- Session name
+- Total sessions count
+- Background tasks
+- Last push time
+- Git branch
 
-## 🔧 Configuration
+Right side (system stats):
+- Claude account
+- RAM usage
+- CPU usage
+- Disk usage
+- SSH tunnel status
 
-### Custom Command (instead of Claude)
+### Keyboard Shortcuts
 
-You can modify the command that runs in new sessions by editing `tmux-project`:
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+b d` | Detach (session continues) |
+| `Ctrl+b z` | Session navigator |
+| `Option+z` | Session navigator (quick) |
+| `Ctrl+b r` | Reload tmux config |
+
+## Configuration
+
+### Add a Project Manually
+
+Edit your shell config (`~/.zshrc` or `~/.bashrc`):
 
 ```bash
-# Default
-SESSION_CMD="claude --dangerously-skip-permissions"
-
-# Custom example
-SESSION_CMD="nvim"
+alias c-myproject='tmux-project MyProject /path/to/project'
 ```
 
-Or use `--no-claude` flag for plain shell sessions.
+### Configure Ports
 
-### Bash Support
-
-The scripts are written for `zsh` but can be adapted for `bash`:
+Edit `~/.local/bin/tmux-project` and add to the `PROJECT_PORTS` array:
 
 ```bash
-# Change shebang in both scripts
-#!/bin/bash
-
-# Replace zsh-specific syntax:
-# ${choice:l}  →  ${choice,,}
+declare -A PROJECT_PORTS=(
+    ["MyProject"]=3001
+    ["Backend"]=4001
+    ["API"]=8080
+)
 ```
 
-## 📁 File Locations
+### Customize Status Bar
+
+Edit `~/.tmux.conf`:
+
+```bash
+# Left side
+set -g status-left '  #[fg=colour3,bold]#S #[fg=default]| ...'
+
+# Right side
+set -g status-right '... | RAM #[fg=colour3]#(~/.tmux/scripts/ram-usage.sh)  '
+```
+
+## Claude Integration
+
+### /tmux-setup Command
+
+If you use Claude Code, add the `/tmux-setup` command:
+
+```bash
+cp claude/commands/tmux-setup.md ~/.claude/commands/
+```
+
+Then in Claude:
+```
+/tmux-setup
+```
+
+This will:
+1. Scan your system for projects
+2. Detect project types (Next.js, Node, Go, etc.)
+3. Suggest aliases and ports
+4. Generate configuration automatically
+
+### Project Context
+
+Each session sets `SUPERMEMORY_CONTAINER` for memory isolation:
+- Work projects: `work-projectname`
+- Client projects: `client-projectname`
+- Home: `home-global`
+
+## Files
 
 | File | Location |
 |------|----------|
-| `tmux-project` | `~/.local/bin/tmux-project` |
-| `tmux-select` | `~/.local/bin/tmux-select` |
-| `tmux-home` | `~/.local/bin/tmux-home` |
-| `tmux.conf` | `~/.tmux.conf` |
-| Status scripts | `~/.tmux/scripts/` |
-| Aliases | `~/.zshrc` or `~/.bashrc` |
+| Main scripts | `~/.local/bin/tmux-{project,select,nova}` |
+| Status scripts | `~/.tmux/scripts/*.sh` |
+| Tmux config | `~/.tmux.conf` |
+| Project config | `~/.config/tmux-claude/projects.conf` |
 
-## 🤝 Contributing
+## Uninstall
 
-Contributions are welcome! Feel free to:
+```bash
+# Remove scripts
+rm ~/.local/bin/tmux-{project,select,nova}
+rm -rf ~/.tmux/scripts
+rm ~/.config/tmux-claude
 
-1. Fork the repo
-2. Create a feature branch
-3. Submit a PR
+# Remove from shell config (manual)
+# Edit ~/.zshrc and remove the tmux-claude section
+```
 
-## 📄 License
+## Requirements
 
-MIT License - feel free to use this in your own projects!
+- tmux 3.0+
+- bash or zsh
+- curl (for remote install)
+- jq (optional, for Claude account display)
 
-## 🙏 Credits
+## License
 
-Created by [AgentikOS](https://github.com/agentik-os) for the Claude Code community.
+MIT
 
----
+## Credits
 
-**Made with ❤️ for developers who love tmux**
+Built for the [Claude Code](https://claude.ai/code) ecosystem.
+
+Maintained by [Agentik OS](https://github.com/agentik-os).

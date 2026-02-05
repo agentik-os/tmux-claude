@@ -1,0 +1,670 @@
+#!/bin/bash
+# tmux-project v5 - Menu complet avec Dev Server, Git, Init, Background
+# Usage: tmux-project <session_name> <project_path>
+
+SESSION_BASE="$1"
+PROJECT_PATH="$2"
+
+YELLOW='\033[1;33m'
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# Ports par projet - customize in ~/.config/tmux-claude/ports.conf
+# Format: ProjectName=PORT (one per line)
+declare -A PROJECT_PORTS=()
+
+# Load user-defined ports
+PORTS_FILE="$HOME/.config/tmux-claude/ports.conf"
+if [[ -f "$PORTS_FILE" ]]; then
+    while IFS='=' read -r name port; do
+        [[ -z "$name" || "$name" == \#* ]] && continue
+        PROJECT_PORTS["$name"]="$port"
+    done < "$PORTS_FILE"
+fi
+
+# Default port detection based on package.json
+get_default_port() {
+    local pkg="$PROJECT_PATH/package.json"
+    if [[ -f "$pkg" ]]; then
+        # Check for Next.js
+        if grep -q '"next"' "$pkg" 2>/dev/null; then
+            echo "3000"
+            return
+        fi
+        # Check for Vite
+        if grep -q '"vite"' "$pkg" 2>/dev/null; then
+            echo "5173"
+            return
+        fi
+    fi
+    echo "3000"
+}
+
+# Telegram notify state file
+NOTIFY_FILE="$HOME/.config/tmux-notify-state"
+
+get_sessions() {
+    tmux list-sessions -F "#{session_name}|#{session_created}|#{session_windows}" 2>/dev/null | grep "^${SESSION_BASE}" | sort
+}
+
+count_sessions() {
+    local c=$(get_sessions | grep -c . 2>/dev/null)
+    echo "${c:-0}"
+}
+
+get_git_info() {
+    if [ -d "$PROJECT_PATH/.git" ]; then
+        cd "$PROJECT_PATH"
+        local branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        local dirty=$(git status --porcelain 2>/dev/null | wc -l)
+
+        # Commits ahead/behind
+        local ahead=$(git rev-list --count @{u}..HEAD 2>/dev/null || echo "0")
+        local behind=$(git rev-list --count HEAD..@{u} 2>/dev/null || echo "0")
+
+        # Last push time
+        local last_push=""
+        local last_ts=$(git log -1 --format="%at" origin/$branch 2>/dev/null)
+        if [ -n "$last_ts" ]; then
+            local now=$(date +%s)
+            local diff=$((now - last_ts))
+            if [ $diff -lt 3600 ]; then
+                last_push="${diff}m"
+            elif [ $diff -lt 86400 ]; then
+                last_push="$((diff / 3600))h"
+            else
+                last_push="$((diff / 86400))d"
+            fi
+        fi
+
+        echo "$branch|$dirty|$ahead|$behind|$last_push"
+    fi
+}
+
+get_ram() {
+    local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    echo "$((($total - $available) * 100 / $total))%"
+}
+
+get_cpu() {
+    read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
+    local total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+    local used=$((total - idle - iowait))
+    echo "$((used * 100 / total))%"
+}
+
+get_port() {
+    local port="${PROJECT_PORTS[$SESSION_BASE]}"
+    if [[ -z "$port" || "$port" == "0" ]]; then
+        port=$(get_default_port)
+    fi
+    echo "$port"
+}
+
+get_dev_server_status() {
+    local port=$(get_port)
+    if [ "$port" -eq 0 ]; then
+        echo "no-port"
+    elif curl -s -o /dev/null -w "%{http_code}" "http://localhost:$port" 2>/dev/null | grep -q "200\|304"; then
+        echo "running"
+    elif ss -tln 2>/dev/null | grep -q ":$port "; then
+        echo "listening"
+    else
+        echo "stopped"
+    fi
+}
+
+get_notify_state() {
+    if [ -f "$NOTIFY_FILE" ] && grep -q "^$SESSION_BASE=on$" "$NOTIFY_FILE" 2>/dev/null; then
+        echo "on"
+    else
+        echo "off"
+    fi
+}
+
+toggle_notify() {
+    mkdir -p "$(dirname $NOTIFY_FILE)"
+    if [ "$(get_notify_state)" = "on" ]; then
+        sed -i "/^$SESSION_BASE=/d" "$NOTIFY_FILE" 2>/dev/null
+        echo "off"
+    else
+        echo "$SESSION_BASE=on" >> "$NOTIFY_FILE"
+        echo "on"
+    fi
+}
+
+get_bg_tasks() {
+    pgrep -c -f "claude.*background" 2>/dev/null || echo "0"
+}
+
+next_session_name() {
+    local count=$(count_sessions)
+    if [ "$count" -eq 0 ]; then
+        echo "$SESSION_BASE"
+    else
+        echo "${SESSION_BASE}-$((count + 1))"
+    fi
+}
+
+# Attach or switch depending on context
+attach_session() {
+    local name="$1"
+    if [ -n "$TMUX" ]; then
+        # Already inside tmux - switch client
+        tmux switch-client -t "$name"
+    else
+        # Outside tmux - attach
+        tmux attach -t "$name"
+    fi
+}
+
+create_session_bare() {
+    local name="$1"
+    local container="default"
+    local project_lower=$(basename "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+
+    # Detect category from path patterns (customize in ~/.config/tmux-claude/categories.conf)
+    # Default patterns: work, clients, projects, code
+    if [[ "$PROJECT_PATH" == *"/work/"* ]] || [[ "$PROJECT_PATH" == *"/Work/"* ]]; then
+        container="work-$project_lower"
+    elif [[ "$PROJECT_PATH" == *"/clients/"* ]] || [[ "$PROJECT_PATH" == *"/Clients/"* ]]; then
+        container="client-$project_lower"
+    elif [[ "$PROJECT_PATH" == *"/projects/"* ]] || [[ "$PROJECT_PATH" == *"/Projects/"* ]]; then
+        container="project-$project_lower"
+    elif [[ "$PROJECT_PATH" == "$HOME" ]]; then
+        container="home-global"
+    else
+        container="$project_lower"
+    fi
+
+    tmux new-session -d -s "$name" -c "$PROJECT_PATH"
+
+    # Set supermemory container if available
+    if command -v supermemory &> /dev/null || [[ -n "$SUPERMEMORY_CC_API_KEY" ]]; then
+        tmux set-environment -t "$name" SUPERMEMORY_CONTAINER "$container"
+    fi
+
+    echo "$name"
+}
+
+# Sous-menu NEW
+show_new_menu() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}New Session${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) Claude - Fresh"
+    echo -e "  ${YELLOW}2${RESET}) Claude - Resume"
+    echo -e "  ${YELLOW}3${RESET}) Shell only"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_new() {
+    while true; do
+        show_new_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "claude --dangerously-skip-permissions" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            2)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "claude --dangerously-skip-permissions --resume" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            3)
+                local name=$(create_session_bare "$(next_session_name)")
+                attach_session "$name"
+                exit 0
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+# Sous-menu DEV SERVER
+show_dev_menu() {
+    clear
+    local port=$(get_port)
+    local status=$(get_dev_server_status)
+
+    echo ""
+    echo -e "  ${BOLD}Dev Server${RESET}"
+    echo -e "  Port: ${YELLOW}$port${RESET} | Status: "
+    case "$status" in
+        running) echo -e "${GREEN}running${RESET}" ;;
+        listening) echo -e "${YELLOW}listening${RESET}" ;;
+        stopped) echo -e "${RED}stopped${RESET}" ;;
+        *) echo -e "${DIM}no port configured${RESET}" ;;
+    esac
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) Start (npm run dev)"
+    echo -e "  ${YELLOW}2${RESET}) Start background (nohup)"
+    echo -e "  ${YELLOW}3${RESET}) Clean + Restart"
+    echo -e "  ${YELLOW}4${RESET}) Stop (kill port)"
+    echo -e "  ${YELLOW}5${RESET}) View logs"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_dev() {
+    local port=$(get_port)
+    while true; do
+        show_dev_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "PORT=$port npm run dev" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            2)
+                cd "$PROJECT_PATH"
+                PORT=$port nohup npm run dev > /tmp/${SESSION_BASE,,}-dev.log 2>&1 &
+                echo "  Started in background. PID: $!"
+                sleep 2
+                ;;
+            3)
+                echo "  Cleaning cache..."
+                cd "$PROJECT_PATH"
+                rm -rf node_modules/.cache .next/cache .turbo 2>/dev/null
+                lsof -ti:$port | xargs kill -9 2>/dev/null
+                sleep 1
+                PORT=$port nohup npm run dev > /tmp/${SESSION_BASE,,}-dev.log 2>&1 &
+                echo "  Restarted. PID: $!"
+                sleep 2
+                ;;
+            4)
+                lsof -ti:$port | xargs kill -9 2>/dev/null
+                echo "  Stopped"
+                sleep 1
+                ;;
+            5)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "tail -f /tmp/${SESSION_BASE,,}-dev.log" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+# Sous-menu INIT
+show_init_menu() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}Init Project${RESET}"
+    echo ""
+
+    # Check existing files
+    local has_claude_md="no"
+    local has_claude_dir="no"
+    [ -f "$PROJECT_PATH/CLAUDE.md" ] && has_claude_md="yes"
+    [ -d "$PROJECT_PATH/.claude" ] && has_claude_dir="yes"
+
+    echo -e "  CLAUDE.md: $([ "$has_claude_md" = "yes" ] && echo -e "${GREEN}exists${RESET}" || echo -e "${RED}missing${RESET}")"
+    echo -e "  .claude/: $([ "$has_claude_dir" = "yes" ] && echo -e "${GREEN}exists${RESET}" || echo -e "${RED}missing${RESET}")"
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) Init New (create CLAUDE.md from template)"
+    echo -e "  ${YELLOW}2${RESET}) Init Refresh (update existing, re-index)"
+    echo -e "  ${YELLOW}3${RESET}) View CLAUDE.md"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_init() {
+    while true; do
+        show_init_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                # Init New - create from template
+                if [ ! -f "$PROJECT_PATH/CLAUDE.md" ]; then
+                    cat > "$PROJECT_PATH/CLAUDE.md" << 'TEMPLATE'
+# CLAUDE.md
+
+## Project Overview
+
+[Description du projet]
+
+## Tech Stack
+
+- Framework:
+- Database:
+- Auth:
+
+## Development
+
+```bash
+npm run dev
+```
+
+## Ecosystem Claude
+
+Ce projet a acces a l'ecosysteme Claude complet:
+- Regles globales: `/home/hacker/CLAUDE.md`
+- Agents: `/home/hacker/.claude/agents/`
+- Commandes: `/home/hacker/.claude/commands/`
+TEMPLATE
+                    echo "  CLAUDE.md created"
+                else
+                    echo "  CLAUDE.md already exists"
+                fi
+
+                mkdir -p "$PROJECT_PATH/.claude/rules"
+                echo "  .claude/ directory created"
+                sleep 2
+                ;;
+            2)
+                # Init Refresh - re-index, update
+                echo "  Refreshing project context..."
+                mkdir -p "$PROJECT_PATH/.claude/rules"
+
+                # Run supermemory index if available
+                if command -v supermemory &> /dev/null; then
+                    echo "  Running supermemory index..."
+                fi
+
+                echo "  Done. Run /init inside Claude to complete."
+                sleep 2
+                ;;
+            3)
+                if [ -f "$PROJECT_PATH/CLAUDE.md" ]; then
+                    less "$PROJECT_PATH/CLAUDE.md"
+                else
+                    echo "  CLAUDE.md not found"
+                    sleep 1
+                fi
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+# Sous-menu BACKGROUND TASKS
+show_bg_menu() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}Background Tasks${RESET}"
+    echo ""
+
+    local tasks=$(ps aux | grep -E "claude.*background|claude.*-b" | grep -v grep)
+    if [ -n "$tasks" ]; then
+        echo "$tasks" | while read line; do
+            local pid=$(echo "$line" | awk '{print $2}')
+            local cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf $i" "}')
+            echo -e "  ${YELLOW}$pid${RESET} $cmd"
+        done
+    else
+        echo -e "  ${DIM}No background tasks${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}k${RESET}) Kill a task (enter PID)"
+    echo -e "  ${YELLOW}a${RESET}) Kill all background tasks"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_bg() {
+    while true; do
+        show_bg_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            k|K)
+                echo -n "  PID to kill: "
+                read -r pid
+                kill $pid 2>/dev/null && echo "  Killed $pid" || echo "  Failed"
+                sleep 1
+                ;;
+            a|A)
+                pkill -f "claude.*background" 2>/dev/null
+                pkill -f "claude.*-b" 2>/dev/null
+                echo "  All background tasks killed"
+                sleep 1
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+show_menu() {
+    clear
+    local git_info=$(get_git_info)
+    local branch=$(echo "$git_info" | cut -d'|' -f1)
+    local dirty=$(echo "$git_info" | cut -d'|' -f2 | tr -d '\n' | grep -o '[0-9]*')
+    local ahead=$(echo "$git_info" | cut -d'|' -f3 | tr -d '\n' | grep -o '[0-9]*')
+    local behind=$(echo "$git_info" | cut -d'|' -f4 | tr -d '\n' | grep -o '[0-9]*')
+    local push_time=$(echo "$git_info" | cut -d'|' -f5 | tr -d '\n')
+    dirty=${dirty:-0}
+    ahead=${ahead:-0}
+    behind=${behind:-0}
+
+    local ram=$(get_ram)
+    local cpu=$(get_cpu)
+    local port=$(get_port)
+    local dev_status=$(get_dev_server_status)
+    local notify=$(get_notify_state)
+    local bg_count=$(get_bg_tasks)
+
+    # Header
+    echo ""
+    echo -e "  ${BOLD}$SESSION_BASE${RESET}"
+
+    # Git line
+    if [ -n "$branch" ]; then
+        printf "  %s" "$branch"
+        [ "$dirty" -gt 0 ] && printf "*"
+        [ "$ahead" -gt 0 ] && printf " ${GREEN}+$ahead${RESET}"
+        [ "$behind" -gt 0 ] && printf " ${RED}-$behind${RESET}"
+        [ -n "$push_time" ] && printf " ${DIM}push:$push_time${RESET}"
+        echo ""
+    fi
+
+    # Stats line
+    local stats_line="  RAM $ram ${DIM}|${RESET} CPU $cpu"
+    [ "$port" -gt 0 ] 2>/dev/null && stats_line+=" ${DIM}|${RESET} :$port "
+    case "$dev_status" in
+        running) stats_line+="${GREEN}up${RESET}" ;;
+        listening) stats_line+="${YELLOW}listen${RESET}" ;;
+        stopped) stats_line+="${RED}down${RESET}" ;;
+    esac
+    local bg_num=$(echo "$bg_count" | tr -d '\n' | grep -o '[0-9]*' || echo "0")
+    [ "$bg_num" -gt 0 ] 2>/dev/null && stats_line+=" ${DIM}|${RESET} BG:$bg_num"
+    stats_line+=" ${DIM}|${RESET} Notif:$notify"
+    echo -e "$stats_line"
+    echo ""
+
+    # Sessions
+    local session_list=$(get_sessions)
+    if [ -n "$session_list" ]; then
+        local i=1
+        while IFS='|' read -r name created windows; do
+            [ -z "$name" ] && continue
+            local time=$(date -d "@$created" "+%H:%M" 2>/dev/null || echo "??:??")
+            echo -e "  ${YELLOW}$i${RESET}) $name ${DIM}$time${RESET}"
+            ((i++))
+        done <<< "$session_list"
+    else
+        echo -e "  ${DIM}~ nothing open ~${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${DIM}─────${RESET}"
+    echo ""
+    printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
+
+    if [ -n "$branch" ]; then
+        printf "  ${YELLOW}p${RESET} %-10s ${YELLOW}g${RESET} %-10s ${YELLOW}s${RESET} %-10s\n" "Pull" "Push" "Sync"
+    fi
+
+    printf "  ${YELLOW}v${RESET} %-10s ${YELLOW}i${RESET} %-10s ${YELLOW}b${RESET} %-10s\n" "Dev" "Init" "Background"
+    printf "  ${YELLOW}t${RESET} %-10s ${YELLOW}m${RESET} %-10s ${YELLOW}u${RESET} %-10s\n" "Notif $notify" "Multi" "Usage"
+    printf "  ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Clean" "Nuclear" "Quit"
+    echo ""
+}
+
+main() {
+    while true; do
+        show_menu
+        echo -n "  > "
+        read -r choice
+
+        case "$choice" in
+            ""|1)
+                local first=$(get_sessions | head -1 | cut -d'|' -f1)
+                if [ -n "$first" ]; then
+                    attach_session "$first"
+                    exit 0
+                else
+                    handle_new
+                fi
+                ;;
+            [2-9])
+                local target=$(get_sessions | sed -n "${choice}p" | cut -d'|' -f1)
+                if [ -n "$target" ]; then
+                    attach_session "$target"
+                    exit 0
+                fi
+                ;;
+            n|N) handle_new ;;
+            n1|N1)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "claude --dangerously-skip-permissions" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            n2|N2)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "claude --dangerously-skip-permissions --resume" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            n3|N3)
+                local name=$(create_session_bare "$(next_session_name)")
+                attach_session "$name"
+                exit 0
+                ;;
+            d|D)
+                echo -n "  delete #: "
+                read -r num
+                local target=$(get_sessions | sed -n "${num}p" | cut -d'|' -f1)
+                if [ -n "$target" ]; then
+                    tmux kill-session -t "$target"
+                fi
+                ;;
+            k|K)
+                echo -n "  kill all? y/n: "
+                read -r confirm
+                if [ "$confirm" = "y" ]; then
+                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
+                fi
+                ;;
+            p|P)
+                cd "$PROJECT_PATH" && git pull
+                sleep 1
+                ;;
+            g|G)
+                cd "$PROJECT_PATH"
+                echo -n "  commit msg: "
+                read -r msg
+                git add -A && git commit -m "$msg" && git push
+                sleep 1
+                ;;
+            s|S)
+                cd "$PROJECT_PATH" && git pull && git push
+                sleep 1
+                ;;
+            v|V) handle_dev ;;
+            i|I) handle_init ;;
+            b|B) handle_bg ;;
+            t|T)
+                local new_state=$(toggle_notify)
+                echo "  Notifications: $new_state"
+                sleep 1
+                ;;
+            m|M)
+                # Multi-attach: split and attach to multiple sessions
+                local sessions=$(get_sessions | cut -d'|' -f1)
+                local count=$(echo "$sessions" | wc -l)
+                if [ "$count" -lt 2 ]; then
+                    echo "  Need at least 2 sessions for multi-attach"
+                    sleep 1
+                else
+                    local first=$(echo "$sessions" | sed -n '1p')
+                    local second=$(echo "$sessions" | sed -n '2p')
+                    tmux attach -t "$first" \; split-window -h \; send-keys "tmux switch-client -t $second" Enter
+                    exit 0
+                fi
+                ;;
+            c|C)
+                echo "  Cleaning..."
+                sync
+                echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                pkill -f "node.*orphan" 2>/dev/null
+                npm cache clean --force 2>/dev/null
+                echo "  Done"
+                sleep 1
+                ;;
+            x|X)
+                echo -n "  nuclear? y/n: "
+                read -r confirm
+                if [ "$confirm" = "y" ]; then
+                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {} 2>/dev/null
+                    cd "$PROJECT_PATH"
+                    rm -rf node_modules/.cache .next/cache .turbo .eslintcache tsconfig.tsbuildinfo 2>/dev/null
+                    sync
+                    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                    echo "  Nuked"
+                    sleep 1
+                fi
+                ;;
+            u|U)
+                clear
+                echo ""
+                echo -e "  ${BOLD}Usage${RESET}"
+                echo ""
+                local claude_procs=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
+                echo -e "  Claude processes: ${YELLOW}$claude_procs${RESET}"
+                local account="-"
+                if [ -f ~/.claude/.pool-status.json ]; then
+                    account=$(cat ~/.claude/.pool-status.json | jq -r '.current' 2>/dev/null || echo "-")
+                fi
+                echo -e "  Account: ${YELLOW}$account${RESET}"
+                echo -e "  RAM: ${YELLOW}$(get_ram)${RESET}"
+                echo -e "  CPU: ${YELLOW}$(get_cpu)${RESET}"
+                local ts_count=$(tmux list-sessions 2>/dev/null | wc -l)
+                echo -e "  Tmux sessions: ${YELLOW}$ts_count${RESET}"
+                echo ""
+                echo -e "  ${DIM}For Claude usage: run /usage inside Claude${RESET}"
+                echo ""
+                echo -n "  Press Enter..."
+                read
+                ;;
+            q|Q)
+                exit 0
+                ;;
+        esac
+    done
+}
+
+main

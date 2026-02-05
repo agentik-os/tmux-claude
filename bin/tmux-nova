@@ -1,0 +1,367 @@
+#!/bin/bash
+# tmux-nova v3 - Menu for Nova (OpenClaw)
+# OpenClaw = Gateway + Telegram bot + Agent
+# Usage: c-nova
+
+SESSION_BASE="Nova"
+
+# Configurable paths - customize in ~/.config/tmux-claude/nova.conf
+NOVA_PATH="${NOVA_PATH:-$HOME/nova}"
+TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-}"
+
+# Load config if exists
+if [[ -f "$HOME/.config/tmux-claude/nova.conf" ]]; then
+    source "$HOME/.config/tmux-claude/nova.conf"
+fi
+
+YELLOW='\033[1;33m'
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+get_sessions() {
+    tmux list-sessions -F "#{session_name}|#{session_created}|#{session_windows}" 2>/dev/null | grep "^${SESSION_BASE}" | sort
+}
+
+get_ram() {
+    local total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local available=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    echo "$((($total - $available) * 100 / $total))%"
+}
+
+get_gateway_status() {
+    # Check if gateway is reachable
+    if curl -s --max-time 1 http://127.0.0.1:18789/ > /dev/null 2>&1; then
+        echo "up"
+    elif systemctl --user is-active openclaw-gateway > /dev/null 2>&1; then
+        echo "starting"
+    else
+        echo "down"
+    fi
+}
+
+get_openclaw_sessions() {
+    openclaw sessions --json 2>/dev/null | jq -r '.[].id' 2>/dev/null | wc -l
+}
+
+next_session_name() {
+    local count=$(get_sessions | grep -c . 2>/dev/null || echo "0")
+    if [ "$count" -eq 0 ]; then
+        echo "$SESSION_BASE"
+    else
+        echo "${SESSION_BASE}-$((count + 1))"
+    fi
+}
+
+create_session_bare() {
+    local name="$1"
+    tmux new-session -d -s "$name" -c "$NOVA_PATH"
+    echo "$name"
+}
+
+# Attach or switch depending on context
+attach_session() {
+    local name="$1"
+    if [ -n "$TMUX" ]; then
+        # Already inside tmux - switch client
+        tmux switch-client -t "$name"
+    else
+        # Outside tmux - attach
+        tmux attach -t "$name"
+    fi
+}
+
+# Sous-menu NEW
+show_new_menu() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}New Session${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) TUI Chat (openclaw tui)"
+    echo -e "  ${YELLOW}2${RESET}) Shell (manual commands)"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_new() {
+    while true; do
+        show_new_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "openclaw tui" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            2)
+                local name=$(create_session_bare "$(next_session_name)")
+                attach_session "$name"
+                exit 0
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+# Sous-menu GATEWAY
+show_gateway_menu() {
+    clear
+    local gw_status=$(get_gateway_status)
+
+    echo ""
+    echo -e "  ${BOLD}Gateway${RESET}"
+    printf "  Status: "
+    case "$gw_status" in
+        up) echo -e "${GREEN}running${RESET}" ;;
+        starting) echo -e "${YELLOW}starting${RESET}" ;;
+        *) echo -e "${RED}stopped${RESET}" ;;
+    esac
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) Start"
+    echo -e "  ${YELLOW}2${RESET}) Stop"
+    echo -e "  ${YELLOW}3${RESET}) Restart"
+    echo -e "  ${YELLOW}4${RESET}) Status (detailed)"
+    echo -e "  ${YELLOW}5${RESET}) Logs (follow)"
+    echo -e "  ${YELLOW}6${RESET}) Enable service (systemd)"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_gateway() {
+    while true; do
+        show_gateway_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                echo "  Starting gateway..."
+                openclaw gateway --force &
+                sleep 3
+                ;;
+            2)
+                echo "  Stopping gateway..."
+                pkill -f "openclaw.*gateway" 2>/dev/null
+                systemctl --user stop openclaw-gateway 2>/dev/null
+                sleep 1
+                ;;
+            3)
+                echo "  Restarting gateway..."
+                pkill -f "openclaw.*gateway" 2>/dev/null
+                systemctl --user stop openclaw-gateway 2>/dev/null
+                sleep 1
+                openclaw gateway --force &
+                sleep 3
+                ;;
+            4)
+                clear
+                echo ""
+                openclaw gateway status 2>/dev/null
+                echo ""
+                echo -n "  Press Enter..."
+                read
+                ;;
+            5)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "openclaw logs -f" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            6)
+                echo "  Enabling systemd service..."
+                systemctl --user enable openclaw-gateway 2>/dev/null
+                systemctl --user start openclaw-gateway 2>/dev/null
+                sleep 2
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+# Sous-menu AGENT (envoyer des messages)
+show_agent_menu() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}Agent${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) Send message to Telegram"
+    echo -e "  ${YELLOW}2${RESET}) Quick message (inline)"
+    echo -e "  ${YELLOW}3${RESET}) Voice message (TTS)"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_agent() {
+    while true; do
+        show_agent_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "openclaw agent --channel telegram --to $TELEGRAM_USER_ID --message \""
+                attach_session "$name"
+                exit 0
+                ;;
+            2)
+                echo -n "  Message: "
+                read -r msg
+                if [ -n "$msg" ]; then
+                    echo "  Sending..."
+                    openclaw agent --channel telegram --to $TELEGRAM_USER_ID --message "$msg" --deliver 2>/dev/null
+                    echo "  Sent"
+                    sleep 1
+                fi
+                ;;
+            3)
+                echo -n "  Text for TTS: "
+                read -r msg
+                if [ -n "$msg" ]; then
+                    echo "  Generating voice..."
+                    # TTS script - configure NOVA_TTS_SCRIPT in nova.conf
+                    if [[ -n "$NOVA_TTS_SCRIPT" ]] && [[ -x "$NOVA_TTS_SCRIPT" ]]; then
+                        "$NOVA_TTS_SCRIPT" "$msg" --send 2>/dev/null
+                    else
+                        echo "  TTS not configured (set NOVA_TTS_SCRIPT in ~/.config/tmux-claude/nova.conf)"
+                    fi
+                    echo "  Done"
+                    sleep 1
+                fi
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
+show_menu() {
+    clear
+    local ram=$(get_ram)
+    local gw_status=$(get_gateway_status)
+    local oc_sessions=$(get_openclaw_sessions)
+
+    # Header
+    echo ""
+    echo -e "  ${BOLD}Nova${RESET} ${DIM}(OpenClaw)${RESET}"
+    printf "  Gateway: "
+    case "$gw_status" in
+        up) printf "${GREEN}up${RESET}" ;;
+        starting) printf "${YELLOW}...${RESET}" ;;
+        *) printf "${RED}down${RESET}" ;;
+    esac
+    echo -e " ${DIM}|${RESET} Sessions: $oc_sessions ${DIM}|${RESET} RAM $ram"
+    echo ""
+
+    # Tmux sessions
+    local session_list=$(get_sessions)
+    if [ -n "$session_list" ]; then
+        local i=1
+        while IFS='|' read -r name created windows; do
+            [ -z "$name" ] && continue
+            local time=$(date -d "@$created" "+%H:%M" 2>/dev/null || echo "??:??")
+            echo -e "  ${YELLOW}$i${RESET}) $name ${DIM}$time${RESET}"
+            ((i++))
+        done <<< "$session_list"
+    else
+        echo -e "  ${DIM}~ no tmux sessions ~${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${DIM}─────${RESET}"
+    echo ""
+    printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
+    printf "  ${YELLOW}g${RESET} %-10s ${YELLOW}a${RESET} %-10s ${YELLOW}s${RESET} %-10s\n" "Gateway" "Agent" "Sessions"
+    printf "  ${YELLOW}h${RESET} %-10s ${YELLOW}w${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Health" "Dashboard" "Quit"
+    echo ""
+}
+
+main() {
+    while true; do
+        show_menu
+        echo -n "  > "
+        read -r choice
+
+        case "$choice" in
+            ""|1)
+                local first=$(get_sessions | head -1 | cut -d'|' -f1)
+                if [ -n "$first" ]; then
+                    attach_session "$first"
+                    exit 0
+                else
+                    handle_new
+                fi
+                ;;
+            [2-9])
+                local target=$(get_sessions | sed -n "${choice}p" | cut -d'|' -f1)
+                if [ -n "$target" ]; then
+                    attach_session "$target"
+                    exit 0
+                fi
+                ;;
+            n|N) handle_new ;;
+            n1|N1)
+                local name=$(create_session_bare "$(next_session_name)")
+                tmux send-keys -t "$name" "openclaw tui" Enter
+                attach_session "$name"
+                exit 0
+                ;;
+            n2|N2)
+                local name=$(create_session_bare "$(next_session_name)")
+                attach_session "$name"
+                exit 0
+                ;;
+            d|D)
+                echo -n "  delete #: "
+                read -r num
+                local target=$(get_sessions | sed -n "${num}p" | cut -d'|' -f1)
+                if [ -n "$target" ]; then
+                    tmux kill-session -t "$target"
+                fi
+                ;;
+            k|K)
+                echo -n "  kill all? y/n: "
+                read -r confirm
+                if [ "$confirm" = "y" ]; then
+                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
+                fi
+                ;;
+            g|G) handle_gateway ;;
+            a|A) handle_agent ;;
+            s|S)
+                clear
+                echo ""
+                echo -e "  ${BOLD}OpenClaw Sessions${RESET}"
+                echo ""
+                openclaw sessions 2>/dev/null || echo "  No sessions or gateway down"
+                echo ""
+                echo -n "  Press Enter..."
+                read
+                ;;
+            h|H)
+                clear
+                echo ""
+                echo -e "  ${BOLD}Health Check${RESET}"
+                echo ""
+                openclaw doctor 2>/dev/null || echo "  Error"
+                echo ""
+                echo -n "  Press Enter..."
+                read
+                ;;
+            w|W)
+                echo "  Opening dashboard..."
+                openclaw dashboard 2>/dev/null &
+                sleep 1
+                ;;
+            q|Q)
+                exit 0
+                ;;
+        esac
+    done
+}
+
+main
