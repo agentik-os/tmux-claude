@@ -324,11 +324,9 @@ main() {
                 fi
                 ;;
             k|K)
-                echo -n "  kill all? y/n: "
-                read -r confirm
-                if [ "$confirm" = "y" ]; then
-                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
-                fi
+                get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
+                echo "  Killed"
+                sleep 1
                 ;;
             g|G) handle_gateway ;;
             a|A) handle_agent ;;

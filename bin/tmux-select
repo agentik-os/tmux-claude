@@ -150,12 +150,8 @@ main() {
                 fi
                 ;;
             k|K)
-                echo -n "  kill all? y/n: "
-                read -r confirm
-                if [ "$confirm" = "y" ]; then
-                    tmux kill-server 2>/dev/null
-                    exit 0
-                fi
+                tmux kill-server 2>/dev/null
+                exit 0
                 ;;
             c|C)
                 sync

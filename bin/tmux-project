@@ -201,15 +201,11 @@ handle_other_sessions() {
             fi
             ;;
         k|K)
-            echo -n "  kill all other sessions? y/n: "
-            read -r confirm
-            if [ "$confirm" = "y" ]; then
-                echo "$others" | cut -d'|' -f1 | while read name; do
-                    [ -n "$name" ] && tmux kill-session -t "$name" 2>/dev/null
-                done
-                echo "  All other sessions killed"
-                sleep 1
-            fi
+            echo "$others" | cut -d'|' -f1 | while read name; do
+                [ -n "$name" ] && tmux kill-session -t "$name" 2>/dev/null
+            done
+            echo "  Killed"
+            sleep 1
             ;;
         q|Q|"") return ;;
     esac
@@ -670,11 +666,9 @@ main() {
                 fi
                 ;;
             k|K)
-                echo -n "  kill all? y/n: "
-                read -r confirm
-                if [ "$confirm" = "y" ]; then
-                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
-                fi
+                get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
+                echo "  Killed"
+                sleep 1
                 ;;
             p|P)
                 # Pull for projects with git (not used in Home mode)
@@ -724,17 +718,13 @@ main() {
                 sleep 1
                 ;;
             x|X)
-                echo -n "  nuclear? y/n: "
-                read -r confirm
-                if [ "$confirm" = "y" ]; then
-                    get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {} 2>/dev/null
-                    cd "$PROJECT_PATH"
-                    rm -rf node_modules/.cache .next/cache .turbo .eslintcache tsconfig.tsbuildinfo 2>/dev/null
-                    sync
-                    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
-                    echo "  Nuked"
-                    sleep 1
-                fi
+                get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {} 2>/dev/null
+                cd "$PROJECT_PATH"
+                rm -rf node_modules/.cache .next/cache .turbo .eslintcache tsconfig.tsbuildinfo 2>/dev/null
+                sync
+                echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                echo "  Nuked"
+                sleep 1
                 ;;
             u|U)
                 clear
