@@ -1,9 +1,15 @@
 #!/bin/bash
-# tmux-project v5 - Menu complet avec Dev Server, Git, Init, Background
-# Usage: tmux-project <session_name> <project_path>
+# tmux-project v6 - Menu complet avec Dev Server, Git, Init, Background
+# Usage: tmux-project <session_name> <project_path> [--no-claude]
 
 SESSION_BASE="$1"
 PROJECT_PATH="$2"
+NO_CLAUDE=false
+
+# Check for --no-claude flag (Home mode)
+if [[ "$3" == "--no-claude" ]] || [[ "$SESSION_BASE" == "Home" ]]; then
+    NO_CLAUDE=true
+fi
 
 YELLOW='\033[1;33m'
 GREEN='\033[1;32m'
@@ -139,6 +145,115 @@ toggle_notify() {
 
 get_bg_tasks() {
     pgrep -c -f "claude.*background" 2>/dev/null || echo "0"
+}
+
+# Get sessions from OTHER projects (for Home mode)
+get_other_sessions() {
+    tmux list-sessions -F "#{session_name}|#{session_created}" 2>/dev/null | grep -v "^${SESSION_BASE}" | sort
+}
+
+# Handle other sessions menu (Home mode)
+handle_other_sessions() {
+    clear
+    echo ""
+    echo -e "  ${BOLD}Other Sessions${RESET}"
+    echo ""
+
+    local others=$(get_other_sessions)
+    if [ -n "$others" ]; then
+        local i=1
+        while IFS='|' read -r name created; do
+            [ -z "$name" ] && continue
+            local time=$(date -d "@$created" "+%H:%M" 2>/dev/null || echo "??:??")
+            echo -e "  ${YELLOW}$i${RESET}) $name ${DIM}$time${RESET}"
+            ((i++))
+        done <<< "$others"
+    else
+        echo -e "  ${DIM}No other sessions${RESET}"
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}d${RESET}) Delete one session"
+    echo -e "  ${YELLOW}k${RESET}) Kill ALL other sessions"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+
+    echo -n "  > "
+    read -r choice
+
+    case "$choice" in
+        [1-9])
+            local target=$(echo "$others" | sed -n "${choice}p" | cut -d'|' -f1)
+            if [ -n "$target" ]; then
+                attach_session "$target"
+                exit 0
+            fi
+            ;;
+        d|D)
+            echo -n "  delete #: "
+            read -r num
+            local target=$(echo "$others" | sed -n "${num}p" | cut -d'|' -f1)
+            if [ -n "$target" ]; then
+                tmux kill-session -t "$target"
+                echo "  Killed $target"
+                sleep 1
+            fi
+            ;;
+        k|K)
+            echo -n "  kill all other sessions? y/n: "
+            read -r confirm
+            if [ "$confirm" = "y" ]; then
+                echo "$others" | cut -d'|' -f1 | while read name; do
+                    [ -n "$name" ] && tmux kill-session -t "$name" 2>/dev/null
+                done
+                echo "  All other sessions killed"
+                sleep 1
+            fi
+            ;;
+        q|Q|"") return ;;
+    esac
+}
+
+# PURGE mode - aggressive cleanup (Home mode)
+handle_purge() {
+    echo ""
+    echo -e "  ${RED}${BOLD}PURGE MODE${RESET}"
+    echo ""
+    echo -e "  This will:"
+    echo -e "  - Kill ALL Claude processes"
+    echo -e "  - Kill ALL other tmux sessions"
+    echo -e "  - Clean ALL caches (npm, bun)"
+    echo -e "  - Free system RAM"
+    echo ""
+    echo -n "  Confirm PURGE? y/n: "
+    read -r confirm
+
+    if [ "$confirm" = "y" ]; then
+        echo ""
+        echo "  [1/5] Killing Claude processes..."
+        pkill -f "claude" 2>/dev/null
+        sleep 1
+
+        echo "  [2/5] Killing other sessions..."
+        get_other_sessions | cut -d'|' -f1 | while read name; do
+            [ -n "$name" ] && tmux kill-session -t "$name" 2>/dev/null
+        done
+
+        echo "  [3/5] Cleaning caches..."
+        npm cache clean --force 2>/dev/null
+        bun pm cache rm 2>/dev/null
+        rm -rf /tmp/claude-* /tmp/bun-* 2>/dev/null
+
+        echo "  [4/5] Freeing RAM..."
+        sync
+        echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+
+        echo "  [5/5] Done!"
+        echo ""
+        echo -e "  ${GREEN}System purged${RESET}"
+        sleep 2
+    fi
 }
 
 next_session_name() {
@@ -511,15 +626,24 @@ show_menu() {
     echo ""
     echo -e "  ${DIM}─────${RESET}"
     echo ""
-    printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
 
-    if [ -n "$branch" ]; then
-        printf "  ${YELLOW}p${RESET} %-10s ${YELLOW}g${RESET} %-10s ${YELLOW}s${RESET} %-10s\n" "Pull" "Push" "Sync"
+    if [ "$NO_CLAUDE" = true ]; then
+        # HOME MODE - different menu
+        printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
+        printf "  ${YELLOW}o${RESET} %-10s ${YELLOW}b${RESET} %-10s ${YELLOW}u${RESET} %-10s\n" "Others" "Background" "Usage"
+        printf "  ${YELLOW}f${RESET} %-10s ${YELLOW}c${RESET} %-10s ${YELLOW}p${RESET} %-10s\n" "Free RAM" "Clean" "PURGE"
+    else
+        # PROJECT MODE - full menu
+        printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
+
+        if [ -n "$branch" ]; then
+            printf "  ${YELLOW}p${RESET} %-10s ${YELLOW}g${RESET} %-10s ${YELLOW}s${RESET} %-10s\n" "Pull" "Push" "Sync"
+        fi
+
+        printf "  ${YELLOW}v${RESET} %-10s ${YELLOW}i${RESET} %-10s ${YELLOW}b${RESET} %-10s\n" "Dev" "Init" "Background"
+        printf "  ${YELLOW}t${RESET} %-10s ${YELLOW}u${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Notif $notify" "Usage" "Quit"
+        printf "  ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s\n" "Clean" "Nuclear"
     fi
-
-    printf "  ${YELLOW}v${RESET} %-10s ${YELLOW}i${RESET} %-10s ${YELLOW}b${RESET} %-10s\n" "Dev" "Init" "Background"
-    printf "  ${YELLOW}t${RESET} %-10s ${YELLOW}m${RESET} %-10s ${YELLOW}u${RESET} %-10s\n" "Notif $notify" "Multi" "Usage"
-    printf "  ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Clean" "Nuclear" "Quit"
     echo ""
 }
 
@@ -580,8 +704,14 @@ main() {
                 fi
                 ;;
             p|P)
-                cd "$PROJECT_PATH" && git pull
-                sleep 1
+                if [ "$NO_CLAUDE" = true ]; then
+                    # PURGE mode for Home
+                    handle_purge
+                else
+                    # Pull for projects with git
+                    cd "$PROJECT_PATH" && git pull 2>/dev/null
+                    sleep 1
+                fi
                 ;;
             g|G)
                 cd "$PROJECT_PATH"
@@ -602,18 +732,20 @@ main() {
                 echo "  Notifications: $new_state"
                 sleep 1
                 ;;
-            m|M)
-                # Multi-attach: split and attach to multiple sessions
-                local sessions=$(get_sessions | cut -d'|' -f1)
-                local count=$(echo "$sessions" | wc -l)
-                if [ "$count" -lt 2 ]; then
-                    echo "  Need at least 2 sessions for multi-attach"
+            o|O)
+                # Other sessions (Home mode)
+                if [ "$NO_CLAUDE" = true ]; then
+                    handle_other_sessions
+                fi
+                ;;
+            f|F)
+                # Free RAM (Home mode)
+                if [ "$NO_CLAUDE" = true ]; then
+                    echo "  Freeing RAM..."
+                    sync
+                    echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
+                    echo "  Done"
                     sleep 1
-                else
-                    local first=$(echo "$sessions" | sed -n '1p')
-                    local second=$(echo "$sessions" | sed -n '2p')
-                    tmux attach -t "$first" \; split-window -h \; send-keys "tmux switch-client -t $second" Enter
-                    exit 0
                 fi
                 ;;
             c|C)
