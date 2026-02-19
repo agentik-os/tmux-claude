@@ -62,18 +62,39 @@ detect_claude_status() {
         if [ "$cmd" = "claude" ]; then
             local claude_pid=$(pgrep -P "$pane_pid" -x "claude" 2>/dev/null | head -1)
             if [ -n "$claude_pid" ]; then
-                local cpu=$(ps -p "$claude_pid" -o %cpu= 2>/dev/null | xargs)
-                local cpu_int=${cpu%.*}
-                local active=0
-                # Check if claude has shell children with their own sub-processes
-                # (= actively running a tool like git, curl, npm, etc.)
-                # Ignores MCP server processes (node, npm) which always run
+                # Method 1: Check terminal for idle prompt (❯ visible = likely idle)
+                local has_prompt=0
+                local last_lines=$(tmux capture-pane -t "$session" -p -S -4 2>/dev/null)
+                echo "$last_lines" | grep -q '❯' && has_prompt=1
+
+                # Method 2: Check if shell children are running REAL work
+                # Filter out noise: sleep (hooks), ps/grep/etc (our detection),
+                # shells (subshells), and other utility commands
+                local real_work=0
                 for bpid in $(ps --ppid "$claude_pid" --no-headers -o pid,comm 2>/dev/null \
                     | awk '$2=="zsh"||$2=="bash"||$2=="sh"{print $1}'); do
-                    local kids=$(ps --ppid "$bpid" --no-headers -o comm 2>/dev/null | grep -vc '^ps$')
-                    [ "${kids:-0}" -gt 0 ] && active=1 && break
+                    local real_kids=$(ps --ppid "$bpid" --no-headers -o comm 2>/dev/null \
+                        | grep -v -E '^(ps|sleep|cat|grep|tail|head|wc|sed|awk|echo|test|zsh|bash|sh|tee|tr|sort|xargs|date|timeout)$' \
+                        | wc -l)
+                    [ "${real_kids:-0}" -gt 0 ] && real_work=1 && break
                 done
-                [ "$active" -eq 1 ] || [ "${cpu_int:-0}" -gt 30 ] && result="[working]" || result="[idle]"
+
+                # Method 3: CPU check (thinking/streaming)
+                local cpu=$(ps -p "$claude_pid" -o %cpu= 2>/dev/null | xargs)
+                local cpu_int=${cpu%.*}
+
+                # Decision logic:
+                # - Real work (curl, git, node script, etc.) → working
+                # - High CPU (> 30%) → working (thinking/streaming)
+                # - Prompt visible, no real work, low CPU → idle
+                # - No prompt, no work, low CPU → working (rendering/transitioning)
+                if [ "$real_work" -eq 1 ] || [ "${cpu_int:-0}" -gt 30 ]; then
+                    result="[working]"
+                elif [ "$has_prompt" -eq 1 ]; then
+                    result="[idle]"
+                else
+                    result="[working]"
+                fi
             else
                 result="[idle]"
             fi
