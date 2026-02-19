@@ -246,6 +246,7 @@ while true; do
     # Separator + actions
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"────────────────────────────────────────────────────"
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   close all"
+    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   close inactive"
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   close sessions..."
 
     HEADER="cpu ${CPU}%  disk ${DISK}  ram ${RAM}%"
@@ -275,6 +276,18 @@ while true; do
             tmux kill-session -t "$s" 2>/dev/null
         done
         exit 0
+    fi
+
+    # Close inactive: kill [idle] + no-claude sessions, keep [working] + current
+    if echo "$CHOICE" | grep -q 'close inactive'; then
+        for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+            [ "$s" = "$CURRENT_SESSION" ] && continue
+            local_tag=""
+            [ -f "$TMPDIR_SM/$s.status" ] && local_tag=$(cat "$TMPDIR_SM/$s.status")
+            [ "$local_tag" = "[working]" ] && continue
+            tmux kill-session -t "$s" 2>/dev/null
+        done
+        continue
     fi
 
     if echo "$CHOICE" | grep -q 'close sessions'; then
