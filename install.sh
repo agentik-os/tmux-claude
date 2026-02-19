@@ -1,10 +1,10 @@
 #!/bin/bash
-# tmux-claude v2.0 - Smart Adaptive Installer
+# tmux-claude v3.0 - Smart Adaptive Installer
 # Works anywhere, adapts to your projects automatically
 
 set -e
 
-VERSION="2.0.0"
+VERSION="3.0.0"
 REPO_URL="https://raw.githubusercontent.com/agentik-os/tmux-claude/main"
 
 # Colors
@@ -61,6 +61,18 @@ if ! command -v tmux &> /dev/null; then
     exit 1
 fi
 
+# Check for fzf (required for session manager)
+if ! command -v fzf &> /dev/null; then
+    echo -e "  ${YELLOW}fzf not found${RESET} - installing..."
+    if command -v apt &> /dev/null; then
+        sudo apt install -y fzf 2>/dev/null || echo -e "  ${DIM}Install manually: https://github.com/junegunn/fzf${RESET}"
+    elif command -v brew &> /dev/null; then
+        brew install fzf
+    else
+        echo -e "  ${DIM}Install fzf manually: https://github.com/junegunn/fzf${RESET}"
+    fi
+fi
+
 # ============================================
 # PHASE 2: Install Scripts
 # ============================================
@@ -85,7 +97,7 @@ else
     curl -fsSL "$REPO_URL/bin/tmux-select" -o "$BIN_DIR/tmux-select"
     curl -fsSL "$REPO_URL/bin/tmux-nova" -o "$BIN_DIR/tmux-nova" 2>/dev/null || true
 
-    for script in ram-usage cpu-usage disk-usage claude-account sessions-count bg-tasks git-branch last-push tunnel-status pomodoro; do
+    for script in ram-usage cpu-usage disk-usage claude-account sessions-count bg-tasks git-branch last-push tunnel-status pomodoro session-manager; do
         curl -fsSL "$REPO_URL/scripts/${script}.sh" -o "$TMUX_SCRIPTS_DIR/${script}.sh" 2>/dev/null || true
     done
 
