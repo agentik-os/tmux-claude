@@ -559,31 +559,37 @@ while true; do
         continue
     fi
 
-    # Action: open project (from projects.json database)
+    # Action: open project (Home always first + full projects.json database)
     if echo "$CHOICE" | grep -q 'open project'; then
         PROJECTS_DB="/home/hacker/VibeCoding/work/agentik-monitor/bot/projects.json"
-        if [ ! -f "$PROJECTS_DB" ]; then
-            continue
+        # Home is always first entry (shell session, no Claude auto-start)
+        PROJECT_LINES=$(printf '  %-25s  %s' "Home" "~")
+        if [ -f "$PROJECTS_DB" ]; then
+            db_lines=$(jq -r '.projects | to_entries[] | "\(.key)|\(.value.path)"' "$PROJECTS_DB" 2>/dev/null \
+                | sort \
+                | while IFS='|' read -r pname ppath; do
+                    [ -d "$ppath" ] && printf '  %-25s  %s\n' "$pname" "${ppath#/home/hacker/}"
+                  done)
+            [ -n "$db_lines" ] && PROJECT_LINES="${PROJECT_LINES}"$'\n'"${db_lines}"
         fi
-        # Build list: "NAME|PATH" lines, sorted by name, only existing paths
-        PROJECT_LINES=$(jq -r '.projects | to_entries[] | "\(.key)|\(.value.path)"' "$PROJECTS_DB" 2>/dev/null \
-            | sort \
-            | while IFS='|' read -r pname ppath; do
-                [ -d "$ppath" ] && printf '  %-25s  %s\n' "$pname" "${ppath#/home/hacker/}"
-              done)
-        [ -z "$PROJECT_LINES" ] && continue
 
         PROJ_SELECTED=$(echo "$PROJECT_LINES" | fzf \
             --no-multi --reverse --no-info \
             --header="Select project  Enter=open  Esc=back" \
-            --prompt="project > " --pointer=" " --border=none \
+            --prompt="" --pointer=" " --border=none \
             --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
         [ -z "$PROJ_SELECTED" ] && continue
 
         PROJ_NAME=$(echo "$PROJ_SELECTED" | awk '{print $1}')
-        PROJ_PATH=$(jq -r --arg n "$PROJ_NAME" '.projects[$n].path // empty' "$PROJECTS_DB" 2>/dev/null)
-        [ -z "$PROJ_PATH" ] || [ ! -d "$PROJ_PATH" ] && continue
+        if [ "$PROJ_NAME" = "Home" ]; then
+            PROJ_PATH="/home/hacker"
+            HOME_MODE=1
+        else
+            PROJ_PATH=$(jq -r --arg n "$PROJ_NAME" '.projects[$n].path // empty' "$PROJECTS_DB" 2>/dev/null)
+            HOME_MODE=0
+        fi
+        { [ -z "$PROJ_PATH" ] || [ ! -d "$PROJ_PATH" ]; } && continue
 
         if ! tmux has-session -t "$PROJ_NAME" 2>/dev/null; then
             NEW_SESS="$PROJ_NAME"
@@ -593,7 +599,10 @@ while true; do
             NEW_SESS="${PROJ_NAME}-${_i}"
         fi
         tmux new-session -d -s "$NEW_SESS" -c "$PROJ_PATH"
-        tmux send-keys -t "$NEW_SESS" "claude --dangerously-skip-permissions" Enter
+        # Home = shell only (no Claude). Projects = auto-launch Claude.
+        if [ "$HOME_MODE" != "1" ]; then
+            tmux send-keys -t "$NEW_SESS" "claude --dangerously-skip-permissions" Enter
+        fi
         tmux switch-client -t "$NEW_SESS"
         exit 0
     fi
