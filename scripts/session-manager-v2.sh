@@ -237,16 +237,53 @@ detect_claude_status() {
 # ── Classify session into group ──
 classify_session() {
     local name="$1"
-    # System
     [[ "$name" == earthbit* ]] && { echo "system"; return; }
     [[ "$name" == AISB-* ]] && { echo "system"; return; }
-    # Oracle
     [[ "$name" == oracle-* ]] && { echo "oracle"; return; }
-    # Home / user
     [[ "$name" == Home* ]] && { echo "home"; return; }
     [[ "$name" == c-* ]] && { echo "home"; return; }
-    # Everything else = worker/project
     echo "worker"
+}
+
+# ── Extract project key from session name (for grouping oracle+workers together) ──
+# oracle-Causio         → Causio
+# oracle-Causio-2       → Causio
+# Causio-linear-CAU-42  → Causio
+# Causio-fix-auth       → Causio
+# DentistryGPT-verify   → DentistryGPT
+# Home                  → Home
+# Home-4                → Home
+# earthbit-daemon       → _system
+# AISB-bot              → _system
+project_key() {
+    local name="$1"
+    [[ "$name" == earthbit* ]] && { echo "_system"; return; }
+    [[ "$name" == AISB-* ]]    && { echo "_system"; return; }
+    [[ "$name" == Home* ]]     && { echo "Home"; return; }
+    [[ "$name" == c-* ]]       && { echo "Home"; return; }
+    # oracle-X or oracle-X-N → X
+    if [[ "$name" == oracle-* ]]; then
+        local stripped="${name#oracle-}"
+        # Strip trailing -N (oracle duplicates)
+        stripped="${stripped%-[0-9]}"
+        stripped="${stripped%-[0-9][0-9]}"
+        echo "$stripped"
+        return
+    fi
+    # Worker: take first token before first `-`
+    echo "${name%%-*}"
+}
+
+# ── Role within a project (for oracle-first ordering) ──
+# 0 = oracle, 1 = worker, 2 = home, 3 = system
+project_role() {
+    local name="$1"
+    [[ "$name" == oracle-* ]]  && { echo 0; return; }
+    [[ "$name" == Home* ]]     && { echo 2; return; }
+    [[ "$name" == c-* ]]       && { echo 2; return; }
+    [[ "$name" == earthbit* ]] && { echo 3; return; }
+    [[ "$name" == AISB-* ]]    && { echo 3; return; }
+    echo 1
 }
 
 # ── Show kill history ──
@@ -483,28 +520,38 @@ while true; do
 
         line="${prefix} ${tname}${pad_name}  ${right_cols}"
 
-        # Tag with group (sort key: 1=home, 2=oracle, 3=worker, 4=system)
-        grp=$(classify_session "$name")
-        case "$grp" in
-            home)   tag="1home" ;;
-            oracle) tag="2oracle" ;;
-            worker) tag="3worker" ;;
-            system) tag="4system" ;;
+        # Composite sort key: SECTION|PROJECT|ROLE|NAME
+        # SECTION (1 char): 1=Home, 2=Projects (oracle+workers grouped), 3=System
+        # PROJECT: project key (Home / Causio / DentistryGPT / _system…)
+        # ROLE:    0=oracle, 1=worker, 2=home, 3=system (ensures oracle comes before workers in same project)
+        # NAME:    session name (deterministic tiebreaker for multiple oracles/workers)
+        pkey=$(project_key "$name")
+        prole=$(project_role "$name")
+        case "$pkey" in
+            Home)    section=1 ;;
+            _system) section=3 ;;
+            *)       section=2 ;;
         esac
-        TAGGED_LINES+="${tag}|${name}|${line}"$'\n'
+        TAGGED_LINES+="${section}|${pkey}|${prole}|${name}|${line}"$'\n'
     done <<< "$SESSION_DATA"
 
-    # ── Pass 2: Sort by group tag, insert headers, build flat list ──
+    # ── Pass 2: Sort by section → project → role → name, insert blank line between projects ──
     DISPLAY_LIST=" "$'\n'  # blank line after header
     LINE_NUM=1
-    PREV_GRP=""
+    PREV_PKEY=""
 
-    while IFS='|' read -r tag sname line; do
-        [ -z "$tag" ] && continue
+    while IFS='|' read -r section pkey prole sname line; do
+        [ -z "$section" ] && continue
+        # Blank line between distinct project blocks (visual grouping without titles)
+        if [ -n "$PREV_PKEY" ] && [ "$pkey" != "$PREV_PKEY" ]; then
+            DISPLAY_LIST+=" "$'\n'
+            LINE_NUM=$((LINE_NUM + 1))
+        fi
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
         [ "$sname" = "$CURRENT_SESSION" ] && CURRENT_LINE=$LINE_NUM
-    done <<< "$(echo "$TAGGED_LINES" | sort -t'|' -k1,1)"
+        PREV_PKEY="$pkey"
+    done <<< "$(echo "$TAGGED_LINES" | sort -t'|' -k1,1 -k2,2 -k3,3n -k4,4)"
 
     # Remove trailing blank, add separator + actions
     DISPLAY_LIST=$(echo -n "$DISPLAY_LIST" | sed '/^$/d')
