@@ -44,7 +44,11 @@ human_mb() {
     local kb=$1
     if [ "$kb" -lt 1024 ]; then echo "${kb}K"
     elif [ "$kb" -lt 1048576 ]; then echo "$((kb/1024))M"
-    else printf "%.1fG" "$(echo "$kb/1048576" | bc -l 2>/dev/null || echo "$((kb/1048576))")"
+    else
+        # Integer math instead of bc fork: X.Yg with 1 decimal
+        local g=$((kb / 1048576))
+        local d=$(( (kb % 1048576) * 10 / 1048576 ))
+        echo "${g}.${d}G"
     fi
 }
 
@@ -90,111 +94,141 @@ kill_with_history() {
     tmux kill-session -t "$sess" 2>/dev/null
 }
 
-# ── RAM usage for a session (sum RSS of process tree) ──
+# ── RAM usage for a session (awk tree walk over shared PS_SNAP, zero forks) ──
 get_session_ram() {
     local sess="$1" outfile="$2"
-    local total_kb=0
-    for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
-        [ -z "$pane_pid" ] && continue
-        # Direct children RSS
-        local kids_kb=$(ps --ppid "$pane_pid" -o rss= --no-headers 2>/dev/null | awk '{s+=$1}END{print s+0}')
-        total_kb=$((total_kb + kids_kb))
-        # Grandchildren (claude → node → tools)
-        for child in $(ps --ppid "$pane_pid" -o pid= --no-headers 2>/dev/null); do
-            local gc_kb=$(ps --ppid "$child" -o rss= --no-headers 2>/dev/null | awk '{s+=$1}END{print s+0}')
-            total_kb=$((total_kb + gc_kb))
-            # Great-grandchildren (node → claude subagents)
-            for gc in $(ps --ppid "$child" -o pid= --no-headers 2>/dev/null); do
-                local ggc_kb=$(ps --ppid "$gc" -o rss= --no-headers 2>/dev/null | awk '{s+=$1}END{print s+0}')
-                total_kb=$((total_kb + ggc_kb))
-            done
-        done
-    done
-    echo "$total_kb" > "$outfile"
+    local pane_pids
+    # Read pane_pids from batched PANES_SNAP instead of forking tmux per session
+    pane_pids=$(awk -F'\t' -v s="$sess" '$1==s{print $2}' "$PANES_SNAP" 2>/dev/null | tr '\n' ' ')
+    if [ -z "$pane_pids" ] || [ ! -f "$PS_SNAP" ]; then
+        echo 0 > "$outfile"
+        return
+    fi
+    # Full tree walk via awk: sum RSS of all descendants of pane_pids
+    awk -v roots="$pane_pids" '
+        { ppid=$2; pid=$1; rss[pid]=$3; child[ppid]=child[ppid]" "pid }
+        END {
+            n=split(roots, r, " ")
+            total=0
+            for (i=1; i<=n; i++) if (r[i]!="") { q[++qn]=r[i] }
+            while (qn>0) {
+                cur=q[qn]; qn--
+                m=split(child[cur], kids, " ")
+                for (j=1; j<=m; j++) {
+                    k=kids[j]
+                    if (k!="") { total += rss[k]; q[++qn]=k }
+                }
+            }
+            print total
+        }' "$PS_SNAP" > "$outfile"
 }
 
-# ── Deep Claude status detection ──
+# ── Deep Claude status detection (uses PS_SNAP + PANES_SNAP, zero ps/pgrep/tmux forks) ──
 detect_claude_status() {
     local session="$1" outfile="$2"
-    local pane_data=$(tmux list-panes -t "$session" -F '#{pane_pid} #{pane_current_command}' 2>/dev/null)
     local result="" detail=""
 
-    local claude_count=0
-    local all_claude_pids=""
-    while read -r pane_pid cmd; do
-        [ -z "$pane_pid" ] && continue
-        if [ "$cmd" = "claude" ]; then
-            local cpid=$(pgrep -P "$pane_pid" -x "claude" 2>/dev/null | head -1)
-            [ -n "$cpid" ] && { claude_count=$((claude_count+1)); all_claude_pids+="$cpid "; }
-        fi
-    done <<< "$pane_data"
+    # Read panes for this session from batched snapshot
+    local pane_claude_parents=""
+    pane_claude_parents=$(awk -F'\t' -v s="$session" '$1==s && $3=="claude"{print $2}' "$PANES_SNAP" 2>/dev/null | tr '\n' ' ')
 
-    if [ "$claude_count" -eq 0 ]; then
+    if [ -z "$pane_claude_parents" ] || [ ! -f "$PS_SNAP" ]; then
         echo "shell|0|0|" > "$outfile"
         return
     fi
 
-    local total_cpu=0
-    for cpid in $all_claude_pids; do
-        local cpu=$(ps -p "$cpid" -o %cpu= 2>/dev/null | xargs)
-        local cpu_int=${cpu%.*}
-        total_cpu=$((total_cpu + ${cpu_int:-0}))
-    done
+    # One awk call computes: claude_count, total_cpu, subagent_count, real_work tool
+    local stats
+    stats=$(awk -v roots="$pane_claude_parents" '
+        BEGIN {
+            n=split(roots, r, " ")
+            for (i=1; i<=n; i++) if (r[i]!="") rootset[r[i]]=1
+            # ignored commands when checking real_work
+            ignore="ps sleep cat grep tail head wc sed awk echo test zsh bash sh tee tr sort xargs date timeout node claude npm npx tsx"
+            ni=split(ignore, ig, " "); for (i=1; i<=ni; i++) ignored[ig[i]]=1
+        }
+        {
+            pid=$1; ppid=$2; cpu=$4; comm=$5
+            rss_idx=3 # unused here
+            child[ppid]=child[ppid]" "pid
+            pcomm[pid]=comm
+            pcpu[pid]=cpu
+        }
+        END {
+            claude_count=0; subagent_count=0; total_cpu=0; real_work=0; work_tool=""
+            # top-level claude PIDs = direct children of pane pids whose comm is "claude"
+            delete claude_pids
+            for (pp in rootset) {
+                m=split(child[pp], kids, " ")
+                for (j=1; j<=m; j++) {
+                    k=kids[j]
+                    if (k!="" && pcomm[k]=="claude") {
+                        claude_pids[k]=1
+                        claude_count++
+                    }
+                }
+            }
+            if (claude_count==0) { print "shell|0|0|"; exit }
 
-    local subagent_count=0
-    for cpid in $all_claude_pids; do
-        local sub_claudes
-        sub_claudes=$(pgrep -P "$cpid" -x "claude" 2>/dev/null | wc -l)
-        sub_claudes=${sub_claudes:-0}
-        subagent_count=$((subagent_count + sub_claudes))
-        for npid in $(ps --ppid "$cpid" --no-headers -o pid,comm 2>/dev/null | awk '$2=="node"{print $1}'); do
-            local node_claudes
-            node_claudes=$(pgrep -P "$npid" -x "claude" 2>/dev/null | wc -l)
-            node_claudes=${node_claudes:-0}
-            subagent_count=$((subagent_count + node_claudes))
-        done
-    done
+            # Walk full descendant tree of all claude_pids
+            for (cp in claude_pids) {
+                total_cpu += int(pcpu[cp])
+                # BFS
+                qn=0; q[++qn]=cp
+                while (qn>0) {
+                    cur=q[qn]; qn--
+                    m=split(child[cur], kids, " ")
+                    for (j=1; j<=m; j++) {
+                        k=kids[j]
+                        if (k=="") continue
+                        q[++qn]=k
+                        kc=pcomm[k]
+                        if (kc=="claude") subagent_count++
+                        if (!real_work && !(kc in ignored)) {
+                            # skip mcp-*, firecrawl*, chrome-*, playwright* prefixes
+                            if (kc !~ /^(mcp-|firecrawl|chrome-|playwright)/) {
+                                real_work=1
+                                work_tool=kc
+                            }
+                        }
+                    }
+                }
+            }
+            printf "OK|%d|%d|%d|%d|%s\n", claude_count, total_cpu, subagent_count, real_work, work_tool
+        }' "$PS_SNAP")
 
-    local real_work=0
-    local work_tools=""
-    for cpid in $all_claude_pids; do
-        local descendants=$(ps --forest -o pid= --ppid "$cpid" 2>/dev/null | xargs)
-        for dpid in $descendants; do
-            local dcomm=$(ps -p "$dpid" -o comm= 2>/dev/null)
-            [ -z "$dcomm" ] && continue
-            case "$dcomm" in
-                ps|sleep|cat|grep|tail|head|wc|sed|awk|echo|test|zsh|bash|sh|tee|tr|sort|xargs|date|timeout|node|claude|npm|npx|tsx|mcp-*|firecrawl*|chrome-*|playwright*)
-                    continue ;;
-            esac
-            real_work=1
-            work_tools+="${dcomm} "
-            break
-        done
-        [ "$real_work" -eq 1 ] && break
-    done
+    # Shell-only early exit path
+    if [ "${stats%%|*}" = "shell" ]; then
+        echo "shell|0|0|" > "$outfile"
+        return
+    fi
 
-    local last_lines=$(tmux capture-pane -t "$session" -p -S -6 2>/dev/null)
-    local has_prompt=0 is_streaming=0 is_thinking=0 has_tool_use=0
+    local claude_count total_cpu subagent_count real_work work_tools
+    IFS='|' read -r _ claude_count total_cpu subagent_count real_work work_tools <<< "$stats"
 
-    echo "$last_lines" | grep -q '❯' && has_prompt=1
-    echo "$last_lines" | grep -qE '(esc to interrupt|⏳|\.{3}$)' && is_streaming=1
-    echo "$last_lines" | grep -qiE '(Thinking|Planning)' && is_thinking=1
-    echo "$last_lines" | grep -qiE '(Running|Writing|Editing|Reading|Searching|Fetching|Bash|Glob|Grep|Read|Edit|Write|Agent)' && has_tool_use=1
-
+    # Fast path: decide without capture-pane if ps data is conclusive
     if [ "$subagent_count" -gt 0 ]; then
         result="work"; detail="${subagent_count}agents"
     elif [ "$real_work" -eq 1 ]; then
-        result="work"; detail=$(echo "$work_tools" | awk '{print $1}')
+        result="work"; detail="${work_tools%% *}"
     elif [ "$total_cpu" -gt 15 ]; then
         result="work"; detail="cpu${total_cpu}%"
-    elif [ "$is_streaming" -eq 1 ] || [ "$is_thinking" -eq 1 ]; then
-        result="work"; detail="stream"
-    elif [ "$has_tool_use" -eq 1 ] && [ "$has_prompt" -eq 0 ]; then
-        result="work"; detail="tools"
-    elif [ "$has_prompt" -eq 1 ] && [ "$total_cpu" -le 15 ]; then
-        result="idle"; detail=""
     else
-        result="work"; detail="active"
+        # Ambiguous: need a capture-pane to tell idle-at-prompt vs streaming
+        last_lines=$(tmux capture-pane -t "$session" -p -S -6 2>/dev/null)
+        has_prompt=0; is_streaming=0
+        case "$last_lines" in *❯*) has_prompt=1 ;; esac
+        case "$last_lines" in
+            *"esc to interrupt"*|*"⏳"*) is_streaming=1 ;;
+            *Thinking*|*Planning*)       is_streaming=1 ;;
+        esac
+        if [ "$is_streaming" -eq 1 ]; then
+            result="work"; detail="stream"
+        elif [ "$has_prompt" -eq 1 ]; then
+            result="idle"; detail=""
+        else
+            result="work"; detail="active"
+        fi
     fi
 
     echo "${result}|${subagent_count}|${claude_count}|${detail}" > "$outfile"
@@ -225,7 +259,7 @@ show_history() {
     fi
     tac "$HISTORY_FILE" | fzf --no-multi --reverse --no-info \
         --header="Kill History (newest first)  Esc=back" \
-        --prompt="history > " --pointer="›" --border=none \
+        --prompt="history > " --pointer=" " --border=none \
         --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
 }
 
@@ -241,7 +275,7 @@ show_help() {
     help_text+=$'\n'""
     help_text+=$'\n'"  Session Actions"
     help_text+=$'\n'"  x            Kill selected session"
-    help_text+=$'\n'"  .            Toggle kill protection 🔒"
+    help_text+=$'\n'"  .            Toggle kill protection (§)"
     help_text+=$'\n'""
     help_text+=$'\n'"  Preview"
     help_text+=$'\n'"  §            Refresh preview pane"
@@ -250,7 +284,7 @@ show_help() {
     help_text+=$'\n'"  ●  working   Claude is actively running"
     help_text+=$'\n'"  ○  idle      Claude at prompt, waiting"
     help_text+=$'\n'"  ·  shell     No Claude in this session"
-    help_text+=$'\n'"  🔒 protected  Immune to orphan-killer & x"
+    help_text+=$'\n'"  §  protected  Immune to orphan-killer & x"
     help_text+=$'\n'""
     help_text+=$'\n'"  Groups"
     help_text+=$'\n'"  Home         Home-*, c-* sessions"
@@ -262,6 +296,17 @@ show_help() {
     help_text+=$'\n'"  Working sessions are auto-protected."
     help_text+=$'\n'"  After 10min idle, protection is removed."
     help_text+=$'\n'"  Manual . override is respected."
+    help_text+=$'\n'""
+    help_text+=$'\n'"  Status Bar (bottom-right)"
+    help_text+=$'\n'"  D            Disk usage (root partition)"
+    help_text+=$'\n'"  C            CPU load"
+    help_text+=$'\n'"  R            RAM usage"
+    help_text+=$'\n'"  T            Tunnel status (SSH/Chrome debug)"
+    help_text+=$'\n'""
+    help_text+=$'\n'"  Bottom Menu"
+    help_text+=$'\n'"  > open project   Pick a project from projects.json"
+    help_text+=$'\n'"  ~ clean RAM      Drop caches + clear /tmp junk"
+    help_text+=$'\n'"  x kill all       Kill every session except current"
 
     echo "$help_text" | fzf \
         --no-multi --reverse --no-info --disabled \
@@ -324,19 +369,31 @@ show_close_menu() {
 
 # ── Extract session name from display line ──
 extract_name() {
-    echo "$1" | awk '{for(i=1;i<=NF;i++){if($i!=">" && $i!="*" && $i!="●" && $i!="○" && $i!="·" && $i!="🔒"){print $i; exit}}}'
+    echo "$1" | awk '{for(i=1;i<=NF;i++){if($i!=">" && $i!="*" && $i!="●" && $i!="○" && $i!="·" && $i!="§" && $i!="L" && $i!="🔒"){print $i; exit}}}'
 }
 
 # ══════════════════════════════════════════
 # ── Main loop ──
 # ══════════════════════════════════════════
 while true; do
-    CPU=$(top -bn1 2>/dev/null | awk '/^%Cpu/{printf "%.0f", $2+$4}')
+    # Instant CPU from /proc/stat (was top -bn1 = 250ms fork)
+    CPU=$(awk '/^cpu /{t=$2+$3+$4+$5+$6+$7+$8+$9; i=$5+$6; printf "%.0f", (1-i/t)*100}' /proc/stat 2>/dev/null)
     DISK=$(df -h / 2>/dev/null | awk 'NR==2{print $5}')
     RAM=$(free 2>/dev/null | awk '/Mem:/{printf "%.0f", $3/$2*100}')
 
     SESSION_DATA=$(tmux list-sessions -F '#{session_name}|#{session_windows}|#{session_attached}|#{session_activity}|#{session_created}' 2>/dev/null)
     [ -z "$SESSION_DATA" ] && exit 0
+
+    # ── ONE ps snapshot shared across all sessions (was 200+ forks) ──
+    PS_SNAP="$TMPDIR_SM/ps.snap"
+    ps -eo pid,ppid,rss,pcpu,comm --no-headers 2>/dev/null > "$PS_SNAP"
+    export PS_SNAP
+
+    # ── ONE tmux list-panes -a call for ALL sessions (was N tmux calls in pass1) ──
+    # Format: session<TAB>pane_pid<TAB>pane_current_command<TAB>pane_current_path
+    PANES_SNAP="$TMPDIR_SM/panes.snap"
+    tmux list-panes -a -F '#{session_name}	#{pane_pid}	#{pane_current_command}	#{pane_current_path}' 2>/dev/null > "$PANES_SNAP"
+    export PANES_SNAP
 
     # Parallel detection: claude status + RAM
     while IFS='|' read -r sname _rest; do
@@ -352,7 +409,7 @@ while true; do
 
     while IFS='|' read -r name wins attached activity created; do
         [ -z "$name" ] && continue
-        panes=$(tmux list-panes -t "$name" 2>/dev/null | wc -l)
+        panes=$(awk -F'\t' -v s="$name" '$1==s{c++}END{print c+0}' "$PANES_SNAP" 2>/dev/null)
 
         # Marker
         marker=" "
@@ -363,9 +420,9 @@ while true; do
         age=""
         [ -n "$created" ] && [ "$created" -gt 0 ] 2>/dev/null && age=$(human_time $((NOW-created)))
 
-        # Protection badge
+        # Protection badge (§ = 1-col BMP, guaranteed alignment)
         protect_icon=" "
-        is_protected "$name" && { protect_icon="🔒"; TOTAL_PROTECTED=$((TOTAL_PROTECTED+1)); }
+        is_protected "$name" && { protect_icon="§"; TOTAL_PROTECTED=$((TOTAL_PROTECTED+1)); }
 
         # Claude status
         status_icon=" "; status_detail=""
@@ -391,10 +448,15 @@ while true; do
             [ "$ram_kb" -gt 100000 ] && ram_str=$(human_mb "$ram_kb")
         fi
 
-        # Git branch only (path removed from display)
-        pane_path=$(tmux display-message -t "$name" -p '#{pane_current_path}' 2>/dev/null)
+        # Git branch only (path removed from display) — pane_path from batched snapshot
+        pane_path=$(awk -F'\t' -v s="$name" '$1==s{print $4; exit}' "$PANES_SNAP" 2>/dev/null)
         branch=""
-        [ -n "$pane_path" ] && [ -d "$pane_path/.git" ] && branch=$(git -C "$pane_path" branch --show-current 2>/dev/null)
+        # Cheap git branch read: HEAD file, no git fork
+        if [ -n "$pane_path" ] && [ -f "$pane_path/.git/HEAD" ]; then
+            head_ref=""
+            read -r head_ref < "$pane_path/.git/HEAD" 2>/dev/null
+            [ "${head_ref#ref: refs/heads/}" != "$head_ref" ] && branch="${head_ref#ref: refs/heads/}"
+        fi
 
         # Truncate name
         tname=$(truncate_str "$name" "$NAME_MAX")
@@ -405,20 +467,18 @@ while true; do
         col_branch=""
         [ -n "$branch" ] && col_branch=$(truncate_str "$branch" 10)
 
-        # Build line with manual padding (avoids printf multibyte issues)
-        if [ "$protect_icon" = "🔒" ]; then
-            prefix="${marker} ${status_icon} 🔒"
-        else
-            prefix="${marker} ${status_icon}  "
-        fi
+        # Build line with STRICT fixed-width layout — all ASCII except status icon.
+        # Layout: M(1) SP(1) I(1) SP(1) L(1) SP(1) NAME(NAME_MAX) SP(2) RAM(5) SP(1) AGE(6) SP(1) BRANCH(10)
+        # Every field has a deterministic visual width regardless of session state.
+        prefix="${marker} ${status_icon} ${protect_icon}"
 
-        # Pad name to NAME_MAX display columns
+        # Pad name to NAME_MAX display columns (ASCII names = bytes = cols)
         name_len=${#tname}
         name_spaces=$((NAME_MAX - name_len))
         [ "$name_spaces" -lt 0 ] && name_spaces=0
         pad_name=$(printf "%-${name_spaces}s" "")
 
-        # Right columns: ram(5) age(6) branch(10)
+        # Right columns: ram(5) age(6) branch(10) — printf pads to fixed byte count
         printf -v right_cols "%-5s %-6s %-10s" "$col_ram" "$age" "$col_branch"
 
         line="${prefix} ${tname}${pad_name}  ${right_cols}"
@@ -441,21 +501,6 @@ while true; do
 
     while IFS='|' read -r tag sname line; do
         [ -z "$tag" ] && continue
-        grp="${tag:1}"  # strip sort digit
-
-        # Insert group header on group change
-        if [ "$grp" != "$PREV_GRP" ]; then
-            case "$grp" in
-                home)   hdr="Home" ;;
-                oracle) hdr="Oracles" ;;
-                worker) hdr="Workers" ;;
-                system) hdr="System" ;;
-            esac
-            DISPLAY_LIST+="  ── ${hdr} ──"$'\n'
-            LINE_NUM=$((LINE_NUM + 1))
-            PREV_GRP="$grp"
-        fi
-
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
         [ "$sname" = "$CURRENT_SESSION" ] && CURRENT_LINE=$LINE_NUM
@@ -473,19 +518,15 @@ while true; do
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'" "
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"${SEP}"
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'" "
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   + new session"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ◈ open project..."
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ♻ clean RAM"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ⟲ kill history"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ✕ close inactive"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ✕ close sessions..."
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ✕ close all"
+    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   > open project"
+    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ~ clean RAM"
+    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   x kill all"
 
     # Header: single line — stats + help hint
     HEADER="${TOTAL_RAM_STR}  cpu ${CPU}%  ram ${RAM}%  disk ${DISK}  │  ?=help"
 
-    # Preview command
-    PREVIEW_CMD='session=$(echo {} | grep -oP "(?<=\s)[A-Za-z][A-Za-z0-9_-]*" | head -1); if echo {} | grep -qE "close|─────|new session|open project|clean RAM|kill history|♻|✕|◈|⟲|\\+|── "; then echo ""; elif [ -n "$session" ]; then '"$HOME"'/.tmux/scripts/session-preview.sh "$session" "'"$TMPDIR_SM"'"; fi'
+    # Preview command — skip menu items (open project / clean RAM / kill all / separators / group headers)
+    PREVIEW_CMD='line={}; if echo "$line" | grep -qE "^[[:space:]]*$|─────|── |open project|clean RAM|kill all"; then echo ""; else session=$(echo "$line" | grep -oP "(?<=\s)[A-Za-z][A-Za-z0-9_-]*" | head -1); [ -n "$session" ] && '"$HOME"'/.tmux/scripts/session-preview.sh "$session" "'"$TMPDIR_SM"'"; fi'
 
     SELECTED=$(echo "$DISPLAY_LIST" | fzf \
         --no-multi \
@@ -496,7 +537,8 @@ while true; do
         --header="$HEADER" \
         --disabled \
         --expect="x,.,?" \
-        --pointer="›" \
+        --pointer=" " \
+        --prompt="" \
         --border=none \
         --bind "load:pos($CURRENT_LINE)" \
         --bind "§:refresh-preview" \
@@ -517,86 +559,31 @@ while true; do
         continue
     fi
 
-    # Action: new session
-    if echo "$CHOICE" | grep -q 'new session'; then
-        last_num=0
-        for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^Home'); do
-            num=$(echo "$s" | sed 's/Home-\?//')
-            [ -z "$num" ] && num=0
-            [ "$num" -gt "$last_num" ] 2>/dev/null && last_num="$num"
-        done
-        next_num=$((last_num + 1))
-        new_name="Home-${next_num}"
-        tmux new-session -d -s "$new_name" -c /home/hacker 2>/dev/null
-        tmux switch-client -t "$new_name"
-        exit 0
-    fi
-
-    # Action: open project
+    # Action: open project (from projects.json database)
     if echo "$CHOICE" | grep -q 'open project'; then
-        PROJECT_MENU=""
-        PROJECT_MENU+="  ── Work ──"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/agentik-monitor" ] && PROJECT_MENU+="     AgentikMonitor     work/agentik-monitor"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/agentik-os-site" ] && PROJECT_MENU+="     AgentikOS          work/agentik-os-site"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/agkt" ] && PROJECT_MENU+="     AGKT               work/agkt"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/kommu" ] && PROJECT_MENU+="     Kommu              work/kommu"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/L34D" ] && PROJECT_MENU+="     L34D               work/L34D"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/AI-GenX" ] && PROJECT_MENU+="     AI-GenX            work/AI-GenX"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/Polymarket" ] && PROJECT_MENU+="     Polymarket         work/Polymarket"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/storytelling" ] && PROJECT_MENU+="     Storytelling       work/storytelling"$'\n'
-        [ -d "/home/hacker/VibeCoding/work/youtube" ] && PROJECT_MENU+="     YouTube            work/youtube"$'\n'
-        [ -d "/home/hacker/VibeCoding/1-life" ] && PROJECT_MENU+="     1-Life             1-life"$'\n'
-        PROJECT_MENU+="  ── Clients ──"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/DentistryGPT" ] && PROJECT_MENU+="     DentistryGPT       clients/DentistryGPT"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/DentistryGPT-Passerelle" ] && PROJECT_MENU+="     DGP-Passerelle     clients/DentistryGPT-Passerelle"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/Gluten-Libre" ] && PROJECT_MENU+="     GlutenLibre        clients/Gluten-Libre"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/ForumAtWork" ] && PROJECT_MENU+="     ForumAtWork        clients/ForumAtWork"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/LaSphere" ] && PROJECT_MENU+="     LaSphere           clients/LaSphere"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/LawyerAI" ] && PROJECT_MENU+="     LawyerAI           clients/LawyerAI"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/loumna" ] && PROJECT_MENU+="     Loumna             clients/loumna"$'\n'
-        [ -d "/home/hacker/VibeCoding/clients/RM" ] && PROJECT_MENU+="     RM                 clients/RM"$'\n'
-        [ -d "/home/hacker/AltReality" ] && PROJECT_MENU+="  ── AltReality ──"$'\n'
-        [ -d "/home/hacker/AltReality" ] && PROJECT_MENU+="     AltReality >       __altreality_submenu__"$'\n'
+        PROJECTS_DB="/home/hacker/VibeCoding/work/agentik-monitor/bot/projects.json"
+        if [ ! -f "$PROJECTS_DB" ]; then
+            continue
+        fi
+        # Build list: "NAME|PATH" lines, sorted by name, only existing paths
+        PROJECT_LINES=$(jq -r '.projects | to_entries[] | "\(.key)|\(.value.path)"' "$PROJECTS_DB" 2>/dev/null \
+            | sort \
+            | while IFS='|' read -r pname ppath; do
+                [ -d "$ppath" ] && printf '  %-25s  %s\n' "$pname" "${ppath#/home/hacker/}"
+              done)
+        [ -z "$PROJECT_LINES" ] && continue
 
-        PROJECT_MENU=$(echo "$PROJECT_MENU" | sed '/^$/d')
-
-        PROJ_SELECTED=$(echo "$PROJECT_MENU" | fzf \
+        PROJ_SELECTED=$(echo "$PROJECT_LINES" | fzf \
             --no-multi --reverse --no-info \
             --header="Select project  Enter=open  Esc=back" \
-            --prompt="project > " --pointer="›" --border=none \
-            --preview="line={}; if echo \"\$line\" | grep -q '── '; then echo ''; else name=\$(echo \"\$line\" | awk '{print \$1}'); rel=\$(echo \"\$line\" | awk '{print \$2}'); case \"\$rel\" in __alt*) echo 'AltReality sub-projects'; ls -1 /home/hacker/AltReality/ 2>/dev/null;; AltReality*) p=\"/home/hacker/\$rel\";; 1-life*) p=\"/home/hacker/VibeCoding/\$rel\";; *) p=\"/home/hacker/VibeCoding/\$rel\";; esac; [ -n \"\$p\" ] && { [ -f \"\$p/package.json\" ] && echo 'Stack:' && grep -E '\"(next|react|expo|convex|clerk|stripe)\"' \"\$p/package.json\" 2>/dev/null | head -8; echo; [ -d \"\$p/.git\" ] && echo 'Branch:' && git -C \"\$p\" branch --show-current 2>/dev/null && echo && echo 'Recent:' && git -C \"\$p\" log --oneline -5 2>/dev/null; }; fi" \
-            --preview-window=down,30%,wrap \
+            --prompt="project > " --pointer=" " --border=none \
             --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
         [ -z "$PROJ_SELECTED" ] && continue
-        echo "$PROJ_SELECTED" | grep -q '── ' && continue
-
-        if echo "$PROJ_SELECTED" | grep -q '__altreality_submenu__'; then
-            ALT_MENU=""
-            [ -d "/home/hacker/AltReality" ] && ALT_MENU+="  AltReality (root)    AltReality"$'\n'
-            [ -d "/home/hacker/AltReality/01-strategy" ] && ALT_MENU+="  Strategy             AltReality/01-strategy"$'\n'
-            [ -d "/home/hacker/AltReality/02-article" ] && ALT_MENU+="  Article              AltReality/02-article"$'\n'
-            [ -d "/home/hacker/AltReality/03-audio" ] && ALT_MENU+="  Audio                AltReality/03-audio"$'\n'
-            [ -d "/home/hacker/AltReality/04-video" ] && ALT_MENU+="  Video                AltReality/04-video"$'\n'
-            ALT_MENU=$(echo "$ALT_MENU" | sed '/^$/d')
-
-            PROJ_SELECTED=$(echo "$ALT_MENU" | fzf \
-                --no-multi --reverse --no-info \
-                --header="AltReality  Enter=open  Esc=back" \
-                --prompt="alt > " --pointer="›" --border=none \
-                --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
-
-            [ -z "$PROJ_SELECTED" ] && continue
-        fi
 
         PROJ_NAME=$(echo "$PROJ_SELECTED" | awk '{print $1}')
-        PROJ_REL=$(echo "$PROJ_SELECTED" | awk '{print $2}')
-
-        case "$PROJ_REL" in
-            AltReality*) PROJ_PATH="/home/hacker/$PROJ_REL" ;;
-            1-life*)     PROJ_PATH="/home/hacker/VibeCoding/$PROJ_REL" ;;
-            *)           PROJ_PATH="/home/hacker/VibeCoding/$PROJ_REL" ;;
-        esac
+        PROJ_PATH=$(jq -r --arg n "$PROJ_NAME" '.projects[$n].path // empty' "$PROJECTS_DB" 2>/dev/null)
+        [ -z "$PROJ_PATH" ] || [ ! -d "$PROJ_PATH" ] && continue
 
         if ! tmux has-session -t "$PROJ_NAME" 2>/dev/null; then
             NEW_SESS="$PROJ_NAME"
@@ -619,36 +606,11 @@ while true; do
         continue
     fi
 
-    # Action: kill history
-    if echo "$CHOICE" | grep -q 'kill history'; then
-        show_history
-        continue
-    fi
-
-    # Action: close all
-    if echo "$CHOICE" | grep -q 'close all'; then
+    # Action: kill all (except current)
+    if echo "$CHOICE" | grep -q 'kill all'; then
         for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -v "^${CURRENT_SESSION}$"); do
-            kill_with_history "$s" "close-all"
+            kill_with_history "$s" "kill-all"
         done
-        exit 0
-    fi
-
-    # Action: close inactive
-    if echo "$CHOICE" | grep -q 'close inactive'; then
-        for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
-            [ "$s" = "$CURRENT_SESSION" ] && continue
-            is_protected "$s" && continue
-            local_tag=""
-            [ -f "$TMPDIR_SM/$s.status" ] && local_tag=$(cut -d'|' -f1 < "$TMPDIR_SM/$s.status")
-            [ "$local_tag" = "work" ] && continue
-            kill_with_history "$s" "close-inactive"
-        done
-        continue
-    fi
-
-    # Action: close sessions sub-menu
-    if echo "$CHOICE" | grep -q 'close sessions'; then
-        show_close_menu
         continue
     fi
 

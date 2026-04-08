@@ -8,13 +8,14 @@ SESSION="$1"
 STATUS_DIR="${2:-}"
 
 [ -z "$SESSION" ] && exit 0
-tmux has-session -t "$SESSION" 2>/dev/null || { echo "Session not found"; exit 0; }
+# Silent exit if session doesn't exist (so non-session lines show empty preview instead of error)
+tmux has-session -t "$SESSION" 2>/dev/null || exit 0
 
 # ── Compact status line (1 line) ──
 STATUS=""
 
 # Protection
-[ -f "/tmp/.tmux-protected/$SESSION" ] && STATUS+="🔒 "
+[ -f "/tmp/.tmux-protected/$SESSION" ] && STATUS+="§ "
 
 # Claude status
 if [ -n "$STATUS_DIR" ] && [ -f "$STATUS_DIR/${SESSION}.status" ]; then

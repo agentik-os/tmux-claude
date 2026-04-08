@@ -17,50 +17,83 @@ Requirements: `tmux 3.2+`, `fzf 0.40+`, `bash 4+` or `zsh`
 
 ## What You Get
 
-### Session Manager (Ctrl+l / Ctrl+b z / Option+z)
+### Session Manager v4.1 (Ctrl+l / Ctrl+b z / Option+z)
 
-Fullscreen fzf popup that shows all your tmux sessions at a glance:
+Fullscreen fzf popup showing every tmux session, grouped by category, with live Claude status, RAM usage, and a targeted preview:
 
 ```
-cpu 12%  disk 45%  ram 67%
+12G  cpu 21%  ram 67%  disk 45%  │  ?=help
 
->  >  Home                [working]   2w 4p  3h20m  main     ~
-      DentistryGPT        [idle]      1w 1p  1d5h   feat     clients/DentistryGPT
-      Kommu                           1w 2p  6h     develop  work/kommu
-      AltReality                      1w 1p  2d1h            work/AltReality
-   ────────────────────────────────────────────────────
-      close all
-      close sessions...
+── Home ──
+> ● § Home-4                       2.0G   21m
+  ○   Home                         2.1G   13h42m
+
+── Oracles ──
+  ○ § oracle-Causio                 782M  27m    main
+  ○ § oracle-DentistryGPT           1.2G  12m    main
+  ○   oracle-Causio-2               703M  12m    main
+
+── Workers ──
+  ○ § DentistryGPT-verify-done      2.1G  11m    main
+  ●   Kommu-fix-auth                1.4G  4m     develop
+
+────────────────────────────────────────
+   > open project
+   ~ clean RAM
+   x kill all
 ```
 
-**Per-session info:**
+**Per-session columns (strict fixed-width alignment):**
 | Column | Description |
 |--------|-------------|
 | `>` / `*` / ` ` | Current session / attached elsewhere / detached |
-| `[working]` | Claude Code is actively running tools or thinking (CPU > 30%) |
-| `[idle]` | Claude Code is waiting for input at the `>` prompt |
-| _(empty)_ | No Claude Code in this session |
-| `2w 3p` | 2 windows, 3 panes |
-| `3h20m` | Session uptime |
-| `main` | Git branch |
-| `work/kommu` | Shortened project path |
+| `●` / `○` / `·` | Claude working / idle at prompt / no Claude (shell) |
+| `§` / ` ` | Kill-protected / unprotected (immune to orphan-killer & `x` key) |
+| `Home-4` | Session name (padded to 24 cols, truncated with `…` if longer) |
+| `2.0G` | RAM usage of session process tree (hidden if < 100MB) |
+| `21m` | Session age |
+| `main` | Git branch (read directly from `.git/HEAD`, no git fork) |
+
+**Session groups (auto-sorted top → bottom):**
+1. **Home** — `Home*`, `c-*`
+2. **Oracles** — `oracle-*` (project managers)
+3. **Workers** — dispatched work sessions
+4. **System** — `earthbit*`, `AISB-*`
 
 **Keybindings inside the popup:**
 | Key | Action |
 |-----|--------|
+| `↑/↓` | Navigate |
 | `Enter` | Switch to selected session |
-| `x` | Kill session instantly (no confirmation), stays in list |
+| `x` | Kill session (skipped if protected) |
+| `.` | Toggle kill protection (§) |
+| `§` | Refresh preview |
+| `?` | Show help |
 | `Esc` | Close |
-| Type text | Filter/search sessions |
+| Type text | Filter/search |
 
-**Close sessions submenu** groups sessions by project (Home-2, Home-3 -> "Home"):
-| Key | Action |
-|-----|--------|
-| `Tab` | Toggle selection |
-| `Enter` | Kill all selected project groups |
-| `Esc` | Back to main list |
+**Bottom menu (3 actions):**
+| Item | Action |
+|------|--------|
+| `> open project` | Pick a project from `projects.json` (reads the AISB project database via `jq`), auto-creates `tmux new-session` + `claude --dangerously-skip-permissions` |
+| `~ clean RAM` | `drop_caches` + clear `/tmp/.maniac-*`, `/tmp/browser-screenshots/*`, `/tmp/.sm-*` |
+| `x kill all` | Kill every session except the current one |
 
-**Preview pane** shows the last 25 lines of each session's terminal.
+**Auto-protect:** sessions detected as `working` (Claude active with subagents, real tools running, or CPU > 15%) are automatically marked `§` protected. After 10 minutes of idle the protection is dropped. Manual `.` toggle overrides auto-protect.
+
+**Preview pane** shows the last 40 cleaned lines of the selected session's terminal, plus a compact status line (protection, Claude status, path, git branch, RAM).
+
+### Performance
+
+Built for low-latency opens — the entire detection pass runs in ~300ms for 8 sessions on a typical VPS, thanks to:
+
+- **Single `ps -eo pid,ppid,rss,pcpu,comm` snapshot** shared across all sessions (was ~200 forks per open, now 1)
+- **Single `tmux list-panes -a`** snapshot for all sessions (was N tmux calls in pass 1)
+- **Awk tree-walks** for RAM and Claude process detection (zero `ps --ppid`/`pgrep` recursion)
+- **CPU read from `/proc/stat`** instead of `top -bn1` (−250ms)
+- **Git branch read from `.git/HEAD`** directly (no `git` fork)
+- **Lazy `tmux capture-pane`** — only invoked in the ambiguous idle-vs-streaming fallback branch
+- **Integer math for `human_mb`** instead of `bc -l` fork
 
 ### Session Navigator Shortcuts
 
