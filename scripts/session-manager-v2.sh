@@ -652,14 +652,33 @@ while true; do
         END { for (s in cnt) printf "%s\t%d\t%s\n", s, cnt[s], path[s] }
     ' "$PANES_SNAP")
 
-    # Parallel detection: claude status + RAM
-    while IFS='|' read -r sname _rest; do
-        detect_claude_status "$sname" "$TMPDIR_SM/$sname.status" &
-        get_session_ram "$sname" "$TMPDIR_SM/$sname.ram" &
-    done <<< "$SESSION_DATA"
-    # Bulk-load AISB progress while detection runs in background → free perf
-    load_all_progress
-    wait
+    # Status cache shared across rapid reopens (TTL 2 s) — skips the parallel
+    # detect_claude_status block entirely when the cache is fresh, saving the
+    # ~200 ms otherwise spent waiting for 35+ background subshells.
+    STATUS_CACHE_DIR="/tmp/.tmux-sm-cache-${USER:-hacker}"
+    mkdir -p "$STATUS_CACHE_DIR" 2>/dev/null
+    CACHE_TS_FILE="$STATUS_CACHE_DIR/.ts"
+    NOW_S=$(date +%s)
+    CACHE_AGE=999
+    [ -f "$CACHE_TS_FILE" ] && CACHE_AGE=$((NOW_S - $(stat -c %Y "$CACHE_TS_FILE" 2>/dev/null || echo 0)))
+
+    if [ "$CACHE_AGE" -ge 2 ]; then
+        # Cache stale → drop old per-session files, run parallel detect into cache
+        find "$STATUS_CACHE_DIR" -maxdepth 1 -name '*.status' -delete 2>/dev/null
+        find "$STATUS_CACHE_DIR" -maxdepth 1 -name '*.ram' -delete 2>/dev/null
+        while IFS='|' read -r sname _rest; do
+            detect_claude_status "$sname" "$STATUS_CACHE_DIR/$sname.status" &
+            get_session_ram      "$sname" "$STATUS_CACHE_DIR/$sname.ram" &
+        done <<< "$SESSION_DATA"
+        load_all_progress    # runs in foreground while detect runs in background
+        wait
+        touch "$CACHE_TS_FILE"
+    else
+        # Cache fresh — just load progress (small, also fast)
+        load_all_progress
+    fi
+    # Pass 1 reads status + ram from STATUS_CACHE_DIR (whether fresh or cached)
+    TMPDIR_SM="$STATUS_CACHE_DIR"
 
     # Common stats / state used by all views
     TOTAL_RAM=0; CURRENT_LINE=1
