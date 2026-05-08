@@ -873,23 +873,17 @@ if [ "$VIEW" = "sessions" ]; then
             [ "$has_blocked" -eq 1 ] && warn_glyph="⚠"
             printf -v progress_field "[%s] %3d%% %s" "$pbar" "$pct" "$warn_glyph"
         fi
-        # Layout in two halves, separated by a FLEXIBLE gap so that:
-        #   • name + age bar + progress stay visually grouped with the name
-        #   • ram + age + branch sit flush-right at the popup's edge
-        # Left half (close to name): age bar(8) + 2sp + progress(19) = 29 chars
-        # Right half (popup edge):   ram(5) + 1sp + age(6) + 1sp + branch(10) = 23 chars
-        printf -v left_half "%-8s  %s" "$bar" "$progress_field"
-        printf -v far_right "%5s %6s %10s" "$col_ram" "$age" "$col_branch"
+        # Packed right-side: bar + progress + ram + age + branch all together
+        # at a FIXED position relative to the name. No flex gap → all columns
+        # land at the SAME visual position across every row, regardless of
+        # popup width. Trailing whitespace fills the rest of the popup.
+        printf -v right_cols "%-8s  %s    %5s %6s %10s" \
+            "$bar" "$progress_field" "$col_ram" "$age" "$col_branch"
 
-        # Total line: prefix(8) + (deco + tname + pad) = NAME_MAX + 2sp + left_half(29) + GAP + far_right(23)
-        # Effective popup width = TERM_W - 4 (popup has ~2-col borders each side).
-        # This makes branch always visible — never cut off by the right border.
-        EFFECTIVE_W=$((TERM_W - 4))
-        gap_n=$((EFFECTIVE_W - 8 - NAME_MAX - 2 - 29 - 23))
-        [ "$gap_n" -lt 1 ] && gap_n=1
-        gap=$(printf '%*s' "$gap_n" "")
-
-        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}  ${left_half}${gap}${far_right}"$'\t'"${sname}"
+        # Layout: prefix(8) + name(NAME_MAX) + 4sp + bar(8) + 2sp + progress(19) + 4sp + ram(5) + 1sp + age(6) + 1sp + branch(10)
+        # The 4-space gap between name and bar gives a "slight right offset"
+        # so bars don't crowd long session names.
+        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}    ${right_cols}"$'\t'"${sname}"
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
         # Killed entries (prole=4, only present in historique view) are visible but
