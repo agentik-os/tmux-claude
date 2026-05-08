@@ -1089,6 +1089,7 @@ fi
 
     SELECTED=$(echo "$DISPLAY_LIST" | fzf \
         --ansi \
+        --sync \
         --no-multi \
         --reverse \
         --no-info \
