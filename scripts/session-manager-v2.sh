@@ -57,10 +57,10 @@ TERM_W=$(tput cols 2>/dev/null || echo 80)
 # Left prefix cost: 2-space indent + marker(1) + space + icon(1) + space + protect(1) + space = 8
 # Double-space after name = 2
 # Total fixed = 34 → NAME_MAX = TERM_W - 34
-NAME_MAX=$((TERM_W - 65))    # age bar (8) + progress bar+% (19) + ram (5) + age (6) + branch (10) + gutters
+NAME_MAX=$((TERM_W - 65))    # default: name area + age bar + progress + ram + age + branch + gutters
 [ "$NAME_MAX" -lt 18 ] && NAME_MAX=18
-# No upper cap — name pad fills the full available width so right_cols (RAM/age/branch)
-# always sit flush at the popup's right edge, just like the cpu/ram/disk stats above.
+[ "$NAME_MAX" -gt 50 ] && NAME_MAX=50    # generous cap — fits ~99% of session names without truncation
+                                          # while keeping the whole row packed (no big gaps anywhere)
 PATH_MAX=$((TERM_W - 60))
 [ "$PATH_MAX" -lt 8 ] && PATH_MAX=8
 
@@ -871,13 +871,23 @@ if [ "$VIEW" = "sessions" ]; then
             [ "$has_blocked" -eq 1 ] && warn_glyph="⚠"
             printf -v progress_field "[%s] %3d%% %s" "$pbar" "$pct" "$warn_glyph"
         fi
-        # ram / age / branch right-aligned (flush to popup right edge), like the top-right stats.
-        printf -v right_cols "%-8s  %s  %5s %6s %10s" "$bar" "$progress_field" "$col_ram" "$age" "$col_branch"
+        # Layout in two halves, separated by a FLEXIBLE gap so that:
+        #   • name + age bar + progress stay visually grouped with the name
+        #   • ram + age + branch sit flush-right at the popup's edge
+        # Left half (close to name): age bar(8) + 2sp + progress(19) = 29 chars
+        # Right half (popup edge):   ram(5) + 1sp + age(6) + 1sp + branch(10) = 23 chars
+        printf -v left_half "%-8s  %s" "$bar" "$progress_field"
+        printf -v far_right "%5s %6s %10s" "$col_ram" "$age" "$col_branch"
 
-        # Append full session name as hidden trailing field (after TAB).
-        # fzf shows only field 1 via --with-nth, but the full name survives in $CHOICE
-        # so extract_name returns the untruncated value for tmux switch-client.
-        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}  ${right_cols}"$'\t'"${sname}"
+        # Total line: prefix(8) + (deco + tname + pad) = NAME_MAX + 2sp + left_half(29) + GAP + far_right(23)
+        # Effective popup width = TERM_W - 4 (popup has ~2-col borders each side).
+        # This makes branch always visible — never cut off by the right border.
+        EFFECTIVE_W=$((TERM_W - 4))
+        gap_n=$((EFFECTIVE_W - 8 - NAME_MAX - 2 - 29 - 23))
+        [ "$gap_n" -lt 1 ] && gap_n=1
+        gap=$(printf '%*s' "$gap_n" "")
+
+        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}  ${left_half}${gap}${far_right}"$'\t'"${sname}"
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
         # Killed entries (prole=4, only present in historique view) are visible but
