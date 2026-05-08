@@ -50,7 +50,9 @@ project_category() {
 }
 
 # Terminal width for adaptive columns
-TERM_W=$(tput cols 2>/dev/null || echo 80)
+# In --render mode (fzf reload child) tput has no tty → use the parent's TERM_W
+# passed via env var. Otherwise probe the actual terminal/popup width.
+TERM_W=${SM_TERM_W:-$(tput cols 2>/dev/null || echo 80)}
 
 # Dynamic NAME_MAX: use all available terminal width.
 # Right-side fixed cost: ram(5) + age(6) + branch(10) + 3 inter-col spaces = 24
@@ -1085,8 +1087,9 @@ fi
         exit 0
     fi
 
-    # Bind §: reload list in-place + refresh preview pane (no popup flash)
-    RELOAD_CMD="$HOME/.tmux/scripts/session-manager-v2.sh --render $VIEW"
+    # Bind §: reload list in-place + refresh preview pane (no popup flash).
+    # SM_TERM_W passes the popup width to the --render child (which has no tty).
+    RELOAD_CMD="SM_TERM_W=$TERM_W $HOME/.tmux/scripts/session-manager-v2.sh --render $VIEW"
 
     SELECTED=$(echo "$DISPLAY_LIST" | fzf \
         --ansi \
