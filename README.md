@@ -63,7 +63,9 @@ Fullscreen fzf popup showing every tmux session, grouped by category, with live 
 **Keybindings inside the popup:**
 | Key | Action |
 |-----|--------|
-| `↑/↓` | Navigate |
+| `↑/↓` | Navigate (skips blank separators and headers) |
+| `Tab` | Cycle to next section (home → work → clients → system) |
+| `⇧Tab` | Spawn a fresh `ClaudeRoot` session at `$HOME` |
 | `Enter` | Switch to selected session |
 | `x` | Kill session (skipped if protected) |
 | `.` | Toggle kill protection (§) |
@@ -102,12 +104,37 @@ Built for low-latency opens — the entire detection pass runs in ~300ms for 8 s
 | `Ctrl+l` | Anywhere in tmux | Open session manager (Termius-friendly) |
 | `Ctrl+b z` | Anywhere in tmux | Open session manager (prefix-based) |
 | `Option+z` | Anywhere in tmux | Open session manager (no prefix) |
+| `Option+/` | Anywhere in tmux | Open session manager (alias) |
+| `c-menu` | Any shell, in or out of tmux | Open session manager (works on cold SSH) |
 
 ### Theme-Neutral
 
 Everything adapts to your terminal's color scheme. Switch themes in Termius, iTerm2, Alacritty, or any terminal - tmux-claude follows automatically. No hardcoded colors in the session manager; selection uses reverse video (fg/bg swap).
 
 The status bar uses `colour3` (ANSI yellow) as the only accent, which maps to whatever your theme defines as yellow.
+
+## Project Auto-Discovery
+
+`scripts/project-analyzer.sh` runs at the end of `install.sh` and scans the usual project roots:
+
+```
+~/VibeCoding/work       → category "work"
+~/VibeCoding/clients    → category "clients"
+~/VibeCoding/1-life     → category "life"
+~/projects ~/code ~/work ~/dev ~/repos ~/src   → category "work"
+```
+
+Detection rule: a directory is a project if it has a `.git/`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Gemfile`, `composer.json`, `pubspec.yaml`, or `requirements.txt`. Stack is auto-detected (Next.js / Vite / Svelte / Nuxt / Rust / Go / Python / Ruby / Node / generic) and emitted as a comment on each line.
+
+Output: `~/.config/tmux-claude/projects.conf` in the format `SessionName|/abs/path|category`.
+
+Re-run any time:
+
+```bash
+bash ~/.tmux/scripts/project-analyzer.sh             # write conf
+bash ~/.tmux/scripts/project-analyzer.sh --dry-run   # preview only
+bash ~/.tmux/scripts/project-analyzer.sh --root ~/extra --category clients
+```
 
 ## Project Aliases
 

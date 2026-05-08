@@ -88,6 +88,7 @@ if [[ "$INSTALL_MODE" == "local" ]]; then
     cp "$SCRIPT_DIR/bin/tmux-project" "$BIN_DIR/"
     cp "$SCRIPT_DIR/bin/tmux-select" "$BIN_DIR/"
     cp "$SCRIPT_DIR/bin/tmux-nova" "$BIN_DIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR/bin/c-menu" "$BIN_DIR/" 2>/dev/null || true
     cp "$SCRIPT_DIR/scripts/"*.sh "$TMUX_SCRIPTS_DIR/"
     cp "$SCRIPT_DIR/tmux.conf" "$HOME/.tmux.conf.tmux-claude"
 else
@@ -96,8 +97,9 @@ else
     curl -fsSL "$REPO_URL/bin/tmux-project" -o "$BIN_DIR/tmux-project"
     curl -fsSL "$REPO_URL/bin/tmux-select" -o "$BIN_DIR/tmux-select"
     curl -fsSL "$REPO_URL/bin/tmux-nova" -o "$BIN_DIR/tmux-nova" 2>/dev/null || true
+    curl -fsSL "$REPO_URL/bin/c-menu" -o "$BIN_DIR/c-menu" 2>/dev/null || true
 
-    for script in ram-usage cpu-usage disk-usage claude-account sessions-count bg-tasks git-branch last-push tunnel-status pomodoro session-manager; do
+    for script in ram-usage cpu-usage disk-usage claude-account sessions-count bg-tasks git-branch last-push tunnel-status pomodoro session-manager session-manager-v2 session-preview sm-skip-nav sm-tab-next project-analyzer; do
         curl -fsSL "$REPO_URL/scripts/${script}.sh" -o "$TMUX_SCRIPTS_DIR/${script}.sh" 2>/dev/null || true
     done
 
@@ -107,6 +109,7 @@ fi
 chmod +x "$BIN_DIR/tmux-project"
 chmod +x "$BIN_DIR/tmux-select"
 chmod +x "$BIN_DIR/tmux-nova" 2>/dev/null || true
+chmod +x "$BIN_DIR/c-menu" 2>/dev/null || true
 chmod +x "$TMUX_SCRIPTS_DIR/"*.sh 2>/dev/null || true
 
 echo -e "  ${GREEN}OK${RESET}"
@@ -145,48 +148,17 @@ fi
 echo -e "  ${DIM}[4/5]${RESET} Scanning for projects..."
 
 PROJECTS_FILE="$CONFIG_DIR/projects.conf"
-> "$PROJECTS_FILE"
+ANALYZER="$TMUX_SCRIPTS_DIR/project-analyzer.sh"
 
-# Common project directories to scan
-SCAN_DIRS=(
-    "$HOME/projects"
-    "$HOME/Projects"
-    "$HOME/code"
-    "$HOME/Code"
-    "$HOME/dev"
-    "$HOME/Dev"
-    "$HOME/work"
-    "$HOME/Work"
-    "$HOME/workspace"
-    "$HOME/Workspace"
-    "$HOME/repos"
-    "$HOME/src"
-    "$HOME/Sites"
-    "$HOME/VibeCoding/work"
-    "$HOME/VibeCoding/clients"
-    "$HOME/VibeCoding/agentic-os"
-)
-
-PROJECT_COUNT=0
-
-for dir in "${SCAN_DIRS[@]}"; do
-    if [[ -d "$dir" ]]; then
-        for project in "$dir"/*/; do
-            if [[ -d "$project" ]]; then
-                # Check if it's a real project (has package.json, .git, or common files)
-                if [[ -f "$project/package.json" ]] || [[ -d "$project/.git" ]] || [[ -f "$project/Cargo.toml" ]] || [[ -f "$project/go.mod" ]] || [[ -f "$project/requirements.txt" ]]; then
-                    project_name=$(basename "$project")
-                    # Create alias name (lowercase, no spaces)
-                    alias_name=$(echo "$project_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
-                    echo "$alias_name|$project_name|${project%/}" >> "$PROJECTS_FILE"
-                    ((PROJECT_COUNT++))
-                fi
-            fi
-        done
-    fi
-done
-
-echo -e "  Found ${YELLOW}$PROJECT_COUNT${RESET} projects"
+if [[ -x "$ANALYZER" ]]; then
+    bash "$ANALYZER" >/dev/null
+    PROJECT_COUNT=$(grep -cvE '^\s*(#|$)' "$PROJECTS_FILE" 2>/dev/null || echo 0)
+    echo -e "  Found ${YELLOW}$PROJECT_COUNT${RESET} projects"
+else
+    echo -e "  ${YELLOW}project-analyzer.sh missing${RESET} — skipping scan"
+    PROJECT_COUNT=0
+    > "$PROJECTS_FILE"
+fi
 
 # ============================================
 # PHASE 5: Setup Shell Aliases
@@ -217,10 +189,15 @@ alias c-home='tmux-project Home $HOME --no-claude'
 
 ALIASES_HEADER
 
-# Add project aliases
-while IFS='|' read -r alias_name project_name project_path; do
+# Add project aliases (format: SessionName|/abs/path|category)
+while IFS='|' read -r session_name project_path category; do
+    [[ -z "$session_name" ]] && continue
+    [[ "$session_name" == \#* ]] && continue
+    # Strip trailing inline comments
+    project_path="${project_path%%#*}"; project_path="${project_path%% }"
+    alias_name=$(echo "$session_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
     [[ -z "$alias_name" ]] && continue
-    echo "alias c-$alias_name='tmux-project $project_name $project_path'" >> "$SHELL_RC"
+    echo "alias c-$alias_name='tmux-project $session_name $project_path'" >> "$SHELL_RC"
 done < "$PROJECTS_FILE"
 
 echo "" >> "$SHELL_RC"
@@ -236,14 +213,17 @@ echo ""
 echo -e "  ${GREEN}Installation complete!${RESET}"
 echo ""
 echo -e "  ${BOLD}Quick start:${RESET}"
-echo -e "  ${DIM}1.${RESET} Reload shell:  ${YELLOW}source $SHELL_RC${RESET}"
-echo -e "  ${DIM}2.${RESET} Open selector: ${YELLOW}ts${RESET}"
+echo -e "  ${DIM}1.${RESET} Reload shell:    ${YELLOW}source $SHELL_RC${RESET}"
+echo -e "  ${DIM}2.${RESET} Session menu:    ${YELLOW}c-menu${RESET}    (or Option+Z / Option+/ inside tmux)"
+echo -e "  ${DIM}3.${RESET} Re-scan projects: ${YELLOW}bash $TMUX_SCRIPTS_DIR/project-analyzer.sh${RESET}"
 echo ""
 
 if [[ $PROJECT_COUNT -gt 0 ]]; then
-    echo -e "  ${BOLD}Your project aliases:${RESET}"
-    head -5 "$PROJECTS_FILE" | while IFS='|' read -r alias_name project_name project_path; do
-        echo -e "  ${YELLOW}c-$alias_name${RESET} -> $project_name"
+    echo -e "  ${BOLD}Your project aliases (first 5):${RESET}"
+    grep -vE '^\s*(#|$)' "$PROJECTS_FILE" | head -5 | while IFS='|' read -r session_name project_path category; do
+        project_path="${project_path%%#*}"; project_path="${project_path%% }"
+        alias_name=$(echo "$session_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+        echo -e "  ${YELLOW}c-$alias_name${RESET} -> $session_name"
     done
     if [[ $PROJECT_COUNT -gt 5 ]]; then
         echo -e "  ${DIM}... and $((PROJECT_COUNT - 5)) more${RESET}"

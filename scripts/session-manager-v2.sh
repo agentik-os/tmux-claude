@@ -14,13 +14,45 @@ mkdir -p "$TMPDIR_SM" "$PROTECT_DIR" "$AUTOPROTECT_DIR"
 trap "rm -rf '$TMPDIR_SM'" EXIT
 touch "$HISTORY_FILE"
 
+# ── Project → category map from projects.json ──
+# Used to bucket sessions into work / clients / life / aisb.
+# Sessions whose project_key isn't in projects.json fall back to "aisb"
+# (i.e. "stuff outside current context").
+declare -A PROJECT_CAT
+PROJECTS_DB="/home/hacker/VibeCoding/work/agentik-monitor/bot/projects.json"
+if [ -f "$PROJECTS_DB" ] && command -v jq >/dev/null 2>&1; then
+    while IFS='|' read -r pname ppath; do
+        case "$ppath" in
+            */VibeCoding/work/*)    PROJECT_CAT[$pname]="work" ;;
+            */VibeCoding/clients/*) PROJECT_CAT[$pname]="clients" ;;
+            */VibeCoding/1-life*)   PROJECT_CAT[$pname]="life" ;;
+        esac
+    done < <(jq -r '.projects | to_entries[] | "\(.key)|\(.value.path)"' "$PROJECTS_DB" 2>/dev/null)
+fi
+
+project_category() {
+    local pkey="$1"
+    case "$pkey" in
+        Home)    echo "home";    return ;;
+        _system) echo "aisb";    return ;;
+    esac
+    local cat="${PROJECT_CAT[$pkey]}"
+    if [ -n "$cat" ]; then echo "$cat"; else echo "aisb"; fi
+}
+
 # Terminal width for adaptive columns
 TERM_W=$(tput cols 2>/dev/null || echo 80)
 
-NAME_MAX=24
+# Dynamic NAME_MAX: use all available terminal width.
+# Right-side fixed cost: ram(5) + age(6) + branch(10) + 3 inter-col spaces = 24
+# Left prefix cost: 2-space indent + marker(1) + space + icon(1) + space + protect(1) + space = 8
+# Double-space after name = 2
+# Total fixed = 34 → NAME_MAX = TERM_W - 34
+NAME_MAX=$((TERM_W - 34))
+[ "$NAME_MAX" -lt 18 ] && NAME_MAX=18
+[ "$NAME_MAX" -gt 60 ] && NAME_MAX=60
 PATH_MAX=$((TERM_W - 60))
 [ "$PATH_MAX" -lt 8 ] && PATH_MAX=8
-[ "$TERM_W" -gt 120 ] && NAME_MAX=30
 
 truncate_str() {
     local str="$1" max="$2"
@@ -30,6 +62,26 @@ truncate_str() {
         echo "$str"
     fi
 }
+
+# truncate_smart: keep right side if mode=start (preserves ticket IDs like CAU-95).
+# Used for worker names: Causio-worker-1-CAU-95 → …-CAU-95 instead of Causio-worker…
+truncate_smart() {
+    local str="$1" max="$2" mode="${3:-end}"
+    if [ "${#str}" -le "$max" ]; then
+        echo "$str"
+        return
+    fi
+    if [ "$mode" = "start" ]; then
+        echo "…${str: -$((max-1))}"
+    else
+        echo "${str:0:$((max-1))}…"
+    fi
+}
+
+# ANSI helpers for warnings (only place color is permitted by user policy).
+RED=$'\033[31m'
+YEL=$'\033[33m'
+RST=$'\033[0m'
 
 human_time() {
     local secs=$1
@@ -291,13 +343,13 @@ show_history() {
     if [ ! -s "$HISTORY_FILE" ]; then
         echo "  (no kill history)" | fzf --no-multi --reverse --no-info \
             --header="Kill History  Esc=back" --prompt="history > " --border=none \
-            --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
+            --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
         return
     fi
     tac "$HISTORY_FILE" | fzf --no-multi --reverse --no-info \
         --header="Kill History (newest first)  Esc=back" \
         --prompt="history > " --pointer=" " --border=none \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
 }
 
 show_help() {
@@ -306,7 +358,9 @@ show_help() {
     help_text+=$'\n'"  ──────────────────────────────────────────"
     help_text+=$'\n'""
     help_text+=$'\n'"  Navigation"
-    help_text+=$'\n'"  ↑/↓         Move between sessions"
+    help_text+=$'\n'"  ↑/↓          Move between sessions (skips blanks)"
+    help_text+=$'\n'"  Tab          Cycle to next section (home/work/clients/system)"
+    help_text+=$'\n'"  ⇧Tab         New ClaudeRoot session at \$HOME"
     help_text+=$'\n'"  Enter        Switch to selected session"
     help_text+=$'\n'"  Esc          Close this menu"
     help_text+=$'\n'""
@@ -349,7 +403,7 @@ show_help() {
         --no-multi --reverse --no-info --disabled \
         --header="Help  │  Esc=back" \
         --pointer=" " --border=none \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
 }
 
 show_close_menu() {
@@ -379,7 +433,7 @@ show_close_menu() {
         --prompt="close > " --pointer=">" --marker="x" --border=none \
         --preview="base=\$(echo {} | sed 's/^[^ ]* *//' | sed 's/  .*//' | xargs); echo \"\$base sessions:\"; echo; tmux list-sessions -F '#{session_name}' 2>/dev/null | grep \"^\${base}\" | while read s; do ppath=\$(tmux display-message -t \"\$s\" -p '#{pane_current_path}' 2>/dev/null | sed 's|/home/hacker/VibeCoding/work/|work/|;s|/home/hacker/VibeCoding/clients/|clients/|;s|/home/hacker|~|'); cmd=\$(tmux list-panes -t \"\$s\" -F '#{pane_current_command}' 2>/dev/null | head -1); echo \"  \$s  (\$cmd)  \$ppath\"; done" \
         --preview-window=down,40%,wrap \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
     [ -z "$selected" ] && return 0
 
@@ -405,8 +459,14 @@ show_close_menu() {
 }
 
 # ── Extract session name from display line ──
+# Primary path: read the hidden field after the trailing TAB (full name, untruncated).
+# Fallback: parse the visible portion (legacy path; ignore tree chars + markers).
 extract_name() {
-    echo "$1" | awk '{for(i=1;i<=NF;i++){if($i!=">" && $i!="*" && $i!="●" && $i!="○" && $i!="·" && $i!="§" && $i!="L" && $i!="🔒"){print $i; exit}}}'
+    local line="$1"
+    case "$line" in
+        *$'\t'*) printf '%s' "${line##*$'\t'}"; return ;;
+    esac
+    echo "$line" | awk '{for(i=1;i<=NF;i++){if($i!=">" && $i!="*" && $i!="●" && $i!="○" && $i!="·" && $i!="§" && $i!="├" && $i!="└" && $i!="L" && $i!="🔒"){print $i; exit}}}'
 }
 
 # ══════════════════════════════════════════
@@ -439,13 +499,16 @@ while true; do
     done <<< "$SESSION_DATA"
     wait
 
-    # ── Pass 1: Build tagged lines (group|line) ──
+    # ── Pass 1: Collect raw fields per session (line built in Pass 2 with tree info) ──
     TAGGED_LINES=""
     CURRENT_LINE=1
     TOTAL_W=0; TOTAL_I=0; TOTAL_SHELL=0; TOTAL_PROTECTED=0; TOTAL_RAM=0
+    unset PKEY_COUNT 2>/dev/null; declare -A PKEY_COUNT
 
     while IFS='|' read -r name wins attached activity created; do
         [ -z "$name" ] && continue
+        # Hide transient launcher sessions (e.g. `_menu` spawned by c-menu outside tmux)
+        [[ "$name" == _* ]] && continue
         panes=$(awk -F'\t' -v s="$name" '$1==s{c++}END{print c+0}' "$PANES_SNAP" 2>/dev/null)
 
         # Marker
@@ -495,63 +558,140 @@ while true; do
             [ "${head_ref#ref: refs/heads/}" != "$head_ref" ] && branch="${head_ref#ref: refs/heads/}"
         fi
 
-        # Truncate name
-        tname=$(truncate_str "$name" "$NAME_MAX")
-
         col_ram=""
         [ -n "$ram_str" ] && col_ram="$ram_str"
 
         col_branch=""
         [ -n "$branch" ] && col_branch=$(truncate_str "$branch" 10)
 
-        # Build line with STRICT fixed-width layout — all ASCII except status icon.
-        # Layout: M(1) SP(1) I(1) SP(1) L(1) SP(1) NAME(NAME_MAX) SP(2) RAM(5) SP(1) AGE(6) SP(1) BRANCH(10)
-        # Every field has a deterministic visual width regardless of session state.
-        prefix="${marker} ${status_icon} ${protect_icon}"
-
-        # Pad name to NAME_MAX display columns (ASCII names = bytes = cols)
-        name_len=${#tname}
-        name_spaces=$((NAME_MAX - name_len))
-        [ "$name_spaces" -lt 0 ] && name_spaces=0
-        pad_name=$(printf "%-${name_spaces}s" "")
-
-        # Right columns: ram(5) age(6) branch(10) — printf pads to fixed byte count
-        printf -v right_cols "%-5s %-6s %-10s" "$col_ram" "$age" "$col_branch"
-
-        line="${prefix} ${tname}${pad_name}  ${right_cols}"
-
         # Composite sort key: SECTION|PROJECT|ROLE|NAME
-        # SECTION (1 char): 1=Home, 2=Projects (oracle+workers grouped), 3=System
-        # PROJECT: project key (Home / Causio / DentistryGPT / _system…)
-        # ROLE:    0=oracle, 1=worker, 2=home, 3=system (ensures oracle comes before workers in same project)
-        # NAME:    session name (deterministic tiebreaker for multiple oracles/workers)
+        # SECTION: 1=home, 2=work, 3=clients, 4=life, 5=aisb
+        # PROJECT: project key (oracle+workers of same project stay grouped)
+        # ROLE:    0=oracle, 1=worker, 2=home, 3=system (oracle first within project)
+        # NAME:    session name (deterministic tiebreaker)
         pkey=$(project_key "$name")
         prole=$(project_role "$name")
-        case "$pkey" in
-            Home)    section=1 ;;
-            _system) section=3 ;;
-            *)       section=2 ;;
+        pcat=$(project_category "$pkey")
+        case "$pcat" in
+            home)    section=1 ;;
+            work)    section=2 ;;
+            clients) section=3 ;;
+            life)    section=4 ;;
+            aisb)    section=5 ;;
+            *)       section=5 ;;
         esac
-        TAGGED_LINES+="${section}|${pkey}|${prole}|${name}|${line}"$'\n'
+        # Track project group size — drives tree decoration in Pass 2
+        PKEY_COUNT[$pkey]=$((${PKEY_COUNT[$pkey]:-0}+1))
+
+        # Emit raw fields for Pass 2 to assemble. ram_kb retained for >1G warning.
+        TAGGED_LINES+="${section}|${pkey}|${prole}|${name}|${marker}|${status_icon}|${protect_icon}|${col_ram}|${age}|${col_branch}|${ram_kb:-0}"$'\n'
     done <<< "$SESSION_DATA"
 
-    # ── Pass 2: Sort by section → project → role → name, insert blank line between projects ──
+    # ── Pass 2: Sort, then iterate with lookahead to build display lines ──
+    # (lookahead drives tree decoration: ├ if a sibling worker follows, └ if last)
+    SORTED=$(echo "$TAGGED_LINES" | sort -t'|' -k1,1 -k2,2 -k3,3n -k4,4)
+    mapfile -t SORTED_ARR <<< "$SORTED"
+    N=${#SORTED_ARR[@]}
+
     DISPLAY_LIST=" "$'\n'  # blank line after header
     LINE_NUM=1
+    PREV_SECTION=""
     PREV_PKEY=""
+    SECTION_POS=""  # space-separated 1-based line numbers (first session of each section)
+    DATA_LINES=""   # space-separated 1-based line numbers of selectable session lines
 
-    while IFS='|' read -r section pkey prole sname line; do
+    for ((idx=0; idx<N; idx++)); do
+        line_data="${SORTED_ARR[$idx]}"
+        [ -z "$line_data" ] && continue
+        IFS='|' read -r section pkey prole sname marker sicon picon col_ram age col_branch ram_kb <<< "$line_data"
         [ -z "$section" ] && continue
-        # Blank line between distinct project blocks (visual grouping without titles)
-        if [ -n "$PREV_PKEY" ] && [ "$pkey" != "$PREV_PKEY" ]; then
+
+        # ── Section header on transition ──
+        if [ "$section" != "$PREV_SECTION" ]; then
+            if [ -n "$PREV_SECTION" ]; then
+                DISPLAY_LIST+=" "$'\n'
+                LINE_NUM=$((LINE_NUM + 1))
+            fi
+            case "$section" in
+                1) sec_label="home" ;;
+                2) sec_label="work" ;;
+                3) sec_label="clients" ;;
+                4) sec_label="life" ;;
+                5) sec_label="aisb" ;;
+                *) sec_label="other" ;;
+            esac
+            DISPLAY_LIST+="  ── ${sec_label} ──"$'\n'
+            LINE_NUM=$((LINE_NUM + 1))
+            SECTION_POS+="$((LINE_NUM + 1)) "  # next line will be the first session of this section
+        elif [ -n "$PREV_PKEY" ] && [ "$pkey" != "$PREV_PKEY" ]; then
             DISPLAY_LIST+=" "$'\n'
             LINE_NUM=$((LINE_NUM + 1))
         fi
+
+        # ── Tree decoration ──
+        # Root (oracle, first in group): "┬ " at indent 0  → 2 cols
+        # Children (workers etc):        "  ├ " or "  └ "  → 4 cols (2-space indent + connector)
+        # The 2-space indent visually nests workers under their oracle.
+        deco=""
+        deco_cols=0
+        if [ "${PKEY_COUNT[$pkey]:-0}" -gt 1 ]; then
+            prev_pkey_arr=""
+            if [ $idx -gt 0 ]; then
+                IFS='|' read -r _ prev_pkey_arr _ _ _ _ _ _ _ _ _ <<< "${SORTED_ARR[$((idx-1))]}"
+            fi
+            next_pkey=""
+            if [ $((idx+1)) -lt $N ]; then
+                IFS='|' read -r _ next_pkey _ _ _ _ _ _ _ _ _ <<< "${SORTED_ARR[$((idx+1))]}"
+            fi
+            if [ "$prev_pkey_arr" != "$pkey" ]; then
+                deco="┬ "                # root
+                deco_cols=2
+            elif [ "$next_pkey" != "$pkey" ]; then
+                deco="  └ "               # last child (indented under parent)
+                deco_cols=4
+            else
+                deco="  ├ "               # middle child
+                deco_cols=4
+            fi
+        fi
+
+        # ── Smart truncate: workers reverse-truncate (preserve ticket ID), others normal ──
+        avail=$((NAME_MAX - deco_cols))
+        if [ "$prole" = "1" ]; then
+            tname=$(truncate_smart "$sname" "$avail" "start")
+        else
+            tname=$(truncate_smart "$sname" "$avail" "end")
+        fi
+
+        # Pad name to fill (NAME_MAX - deco_cols) display columns
+        # NB: tree chars are 3 bytes each (UTF-8) but 1 display column → can't use ${#tname}
+        # for the visible width when reverse-truncated with leading "…" (also 3 bytes / 1 col).
+        # Strategy: count visible chars by stripping multi-byte → keep simple via char count
+        # (LC_ALL=C wc -m approximates well for our ASCII names + at most one "…").
+        visible_cols=$(LC_ALL=C.UTF-8 awk -v s="$tname" 'BEGIN{print length(s)}')
+        name_spaces=$((avail - visible_cols))
+        [ "$name_spaces" -lt 0 ] && name_spaces=0
+        pad_name=$(printf "%-${name_spaces}s" "")
+
+        # ── RAM warning: > 1 GB → red ──
+        if [ "${ram_kb:-0}" -gt 1048576 ] 2>/dev/null; then
+            col_ram="${RED}${col_ram}${RST}"
+        fi
+
+        printf -v right_cols "%-5s %-6s %-10s" "$col_ram" "$age" "$col_branch"
+
+        # Append full session name as hidden trailing field (after TAB).
+        # fzf shows only field 1 via --with-nth, but the full name survives in $CHOICE
+        # so extract_name returns the untruncated value for tmux switch-client.
+        line="${marker} ${sicon} ${picon} ${deco}${tname}${pad_name}  ${right_cols}"$'\t'"${sname}"
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
+        DATA_LINES+="${LINE_NUM} "  # selectable session line — used by skip-nav helper
         [ "$sname" = "$CURRENT_SESSION" ] && CURRENT_LINE=$LINE_NUM
+
+        PREV_SECTION="$section"
         PREV_PKEY="$pkey"
-    done <<< "$(echo "$TAGGED_LINES" | sort -t'|' -k1,1 -k2,2 -k3,3n -k4,4)"
+    done
 
     # Remove trailing blank, add separator + actions
     DISPLAY_LIST=$(echo -n "$DISPLAY_LIST" | sed '/^$/d')
@@ -564,34 +704,43 @@ while true; do
 
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'" "
     DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"${SEP}"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'" "
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   > open project"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   ~ clean RAM"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   x kill all"
+    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   > open project    ~ clean RAM    x kill all"
 
-    # Header: single line — stats + help hint
-    HEADER="${TOTAL_RAM_STR}  cpu ${CPU}%  ram ${RAM}%  disk ${DISK}  │  ?=help"
+    # Header: stats + key bar (one line)
+    HEADER="${TOTAL_RAM_STR}  cpu ${CPU}%  ram ${RAM}%  disk ${DISK}  │  [?]help"
+
+    # Persist line numbers used by fzf bind helpers
+    echo "$SECTION_POS" > /tmp/.sm-sections        # Tab section-cycle
+    echo "$DATA_LINES"  > /tmp/.sm-data-lines      # Down/Up skip-empty
+    echo 0 > /tmp/.sm-section-cursor
 
     # Preview command — skip menu items (open project / clean RAM / kill all / separators / group headers)
     PREVIEW_CMD='line={}; if echo "$line" | grep -qE "^[[:space:]]*$|─────|── |open project|clean RAM|kill all"; then echo ""; else session=$(echo "$line" | grep -oP "(?<=\s)[A-Za-z][A-Za-z0-9_-]*" | head -1); [ -n "$session" ] && '"$HOME"'/.tmux/scripts/session-preview.sh "$session" "'"$TMPDIR_SM"'"; fi'
 
     SELECTED=$(echo "$DISPLAY_LIST" | fzf \
+        --ansi \
         --no-multi \
         --reverse \
         --no-info \
         --no-separator \
         --header-first \
         --header="$HEADER" \
-        --disabled \
-        --expect="x,.,?" \
+        --expect="x,.,?,shift-tab" \
         --pointer=" " \
-        --prompt="" \
+        --prompt="search > " \
         --border=none \
+        --delimiter=$'\t' \
+        --with-nth=1 \
         --bind "load:pos($CURRENT_LINE)" \
         --bind "§:refresh-preview" \
+        --bind "tab:transform(/home/hacker/.tmux/scripts/sm-tab-next.sh)" \
+        --bind "down:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh +1)" \
+        --bind "up:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh -1)" \
+        --bind "ctrl-n:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh +1)" \
+        --bind "ctrl-p:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh -1)" \
         --preview="$PREVIEW_CMD" \
         --preview-window=down,40%,~2,follow \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
     KEY=$(echo "$SELECTED" | head -1)
     CHOICE=$(echo "$SELECTED" | tail -1)
@@ -604,6 +753,22 @@ while true; do
     if [ "$KEY" = "?" ]; then
         show_help
         continue
+    fi
+
+    # Shift+Tab = spawn fresh Claude Code session at /home/hacker (n1 in c-menu).
+    # (fzf does not support alt-tab; shift-tab is the closest Tab variant available.)
+    if [ "$KEY" = "shift-tab" ]; then
+        new_name="ClaudeRoot"
+        _i=2
+        while tmux has-session -t "$new_name" 2>/dev/null; do
+            new_name="ClaudeRoot-$_i"; ((_i++))
+        done
+        tmux new-session -d -s "$new_name" -c "$HOME"
+        tmux set-environment -t "$new_name" -u ANTHROPIC_API_KEY
+        tmux set-option -t "$new_name" remain-on-exit on
+        tmux send-keys -t "$new_name" "claude --dangerously-skip-permissions" Enter
+        tmux switch-client -t "$new_name"
+        exit 0
     fi
 
     # Action: open project (Home always first + full projects.json database)
@@ -624,7 +789,7 @@ while true; do
             --no-multi --reverse --no-info \
             --header="Select project  Enter=open  Esc=back" \
             --prompt="" --pointer=" " --border=none \
-            --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold,bg+:8,hl+:-1:bold:underline,info:-1,prompt:-1:dim,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
+            --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
         [ -z "$PROJ_SELECTED" ] && continue
 

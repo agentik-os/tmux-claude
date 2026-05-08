@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# c-menu — Termius startup menu, identical to Option+Z (M-z) popup.
+# Wraps ~/.tmux/scripts/session-manager-v2.sh so it works whether you start
+# inside or outside tmux.
+
+MENU="$HOME/.tmux/scripts/session-manager-v2.sh"
+
+if [ ! -x "$MENU" ]; then
+    echo "Menu script missing or not executable: $MENU" >&2
+    exit 1
+fi
+
+if [ -n "$TMUX" ]; then
+    # Already inside tmux → exact same popup as the M-z binding.
+    exec tmux display-popup -E -w 100% -h 100% -T " Sessions " "$MENU"
+fi
+
+# Outside tmux (e.g. fresh Termius connection):
+# Spawn a transient launcher session whose only command is the menu.
+# When the user picks a session, the menu calls `tmux switch-client` and
+# exits — terminating the launcher session, leaving the client attached
+# to whatever was picked.
+LAUNCHER="_menu"
+tmux kill-session -t "$LAUNCHER" 2>/dev/null
+exec tmux new-session -s "$LAUNCHER" "$MENU"
