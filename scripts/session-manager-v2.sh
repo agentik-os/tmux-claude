@@ -122,37 +122,51 @@ human_time() {
     fi
 }
 
-# Bulk-load AISB progress state for ALL sessions in one bash pass — avoids N jq
-# forks per render. Populates the global PROGRESS_STATE assoc array, keyed by
-# session name. Value: "<done>/<total>" or "<done>/<total>⚠" (any blocked todo).
+# Bulk-load AISB progress state for ALL sessions in ONE awk pass over every
+# progress.json file. ~110 files processed in one fork instead of bash reading
+# each file line-by-line (was the dominant render cost on hosts with many
+# orchestration files). Populates global PROGRESS_STATE keyed by session name.
 load_all_progress() {
     unset PROGRESS_STATE 2>/dev/null
     declare -gA PROGRESS_STATE
     shopt -s nullglob
-    local pfile base sname total done_n has_blocked v line
-    for pfile in "$HOME/.aisb/state/oracle-"*.progress.json "$HOME/.aisb/state/worker-"*.progress.json; do
-        base="${pfile##*/}"; base="${base%.progress.json}"
-        sname="${base#oracle-}"; sname="${sname#worker-}"
-        total=""; done_n=""; has_blocked=0
-        while IFS= read -r line; do
-            case "$line" in
-                *'"todos_total"'*)
-                    v="${line#*:}"; v="${v%%,*}"; total="${v// /}" ;;
-                *'"todos_completed"'*)
-                    v="${line#*:}"; v="${v%%,*}"; done_n="${v// /}" ;;
-                *'"status": "blocked"'*|*'"status":"blocked"'*)
-                    has_blocked=1 ;;
-            esac
-        done < "$pfile"
-        if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
-            if [ "$has_blocked" -eq 1 ]; then
-                PROGRESS_STATE[$sname]="${done_n}/${total}⚠"
-            else
-                PROGRESS_STATE[$sname]="${done_n}/${total}"
-            fi
-        fi
-    done
+    local files=( "$HOME/.aisb/state/oracle-"*.progress.json "$HOME/.aisb/state/worker-"*.progress.json )
     shopt -u nullglob
+    [ ${#files[@]} -eq 0 ] && return
+    while IFS='|' read -r sname pstr; do
+        [ -n "$sname" ] && PROGRESS_STATE[$sname]="$pstr"
+    done < <(awk '
+        FNR == 1 {
+            # Extract session name from filename
+            base = FILENAME
+            sub(/.*\//, "", base)
+            sub(/\.progress\.json$/, "", base)
+            sub(/^oracle-/, "", base)
+            sub(/^worker-/, "", base)
+            sname = base
+            sessions[sname] = 1
+            total[sname] = ""
+            done_n[sname] = ""
+            blocked[sname] = 0
+        }
+        /"todos_total"/ {
+            n = match($0, /[0-9]+/)
+            if (n) total[sname] = substr($0, RSTART, RLENGTH)
+        }
+        /"todos_completed"/ {
+            n = match($0, /[0-9]+/)
+            if (n) done_n[sname] = substr($0, RSTART, RLENGTH)
+        }
+        /"status"[[:space:]]*:[[:space:]]*"blocked"/ { blocked[sname] = 1 }
+        END {
+            for (s in sessions) {
+                if (total[s] != "" && total[s] != "0") {
+                    suffix = blocked[s] ? "⚠" : ""
+                    printf "%s|%s/%s%s\n", s, done_n[s], total[s], suffix
+                }
+            }
+        }
+    ' "${files[@]}" 2>/dev/null)
 }
 
 # 8-char age bar — log-ish scale on 0..24h.
