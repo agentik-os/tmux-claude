@@ -59,7 +59,8 @@ TERM_W=$(tput cols 2>/dev/null || echo 80)
 # Total fixed = 34 → NAME_MAX = TERM_W - 34
 NAME_MAX=$((TERM_W - 65))    # age bar (8) + progress bar+% (19) + ram (5) + age (6) + branch (10) + gutters
 [ "$NAME_MAX" -lt 18 ] && NAME_MAX=18
-[ "$NAME_MAX" -gt 60 ] && NAME_MAX=60
+# No upper cap — name pad fills the full available width so right_cols (RAM/age/branch)
+# always sit flush at the popup's right edge, just like the cpu/ram/disk stats above.
 PATH_MAX=$((TERM_W - 60))
 [ "$PATH_MAX" -lt 8 ] && PATH_MAX=8
 
