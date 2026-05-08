@@ -1,10 +1,10 @@
 #!/bin/bash
-# tmux-claude v3.0 - Smart Adaptive Installer
+# tmux-claude v3.2 - Smart Adaptive Installer
 # Works anywhere, adapts to your projects automatically
 
 set -e
 
-VERSION="3.1.0"
+VERSION="3.2.0"
 REPO_URL="https://raw.githubusercontent.com/agentik-os/tmux-claude/main"
 
 # Colors
