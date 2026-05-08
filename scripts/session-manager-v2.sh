@@ -441,13 +441,13 @@ show_history() {
     if [ ! -s "$HISTORY_FILE" ]; then
         echo "  (no kill history)" | fzf --no-multi --reverse --no-info \
             --header="Kill History  Esc=back" --prompt="history > " --border=none \
-            --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
+            --color="fg:-1,bg:-1,hl:-1:underline,fg+:0:bold,bg+:7,hl+:1:bold:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
         return
     fi
     tac "$HISTORY_FILE" | fzf --no-multi --reverse --no-info \
         --header="Kill History (newest first)  Esc=back" \
         --prompt="history > " --pointer=" " --border=none \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:0:bold,bg+:7,hl+:1:bold:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
 }
 
 show_help() {
@@ -503,7 +503,7 @@ show_help() {
         --no-multi --reverse --no-info --disabled \
         --header="Help  │  Esc=back" \
         --pointer=" " --border=none \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:0:bold,bg+:7,hl+:1:bold:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1"
 }
 
 show_close_menu() {
@@ -533,7 +533,7 @@ show_close_menu() {
         --prompt="close > " --pointer=">" --marker="x" --border=none \
         --preview="base=\$(echo {} | sed 's/^[^ ]* *//' | sed 's/  .*//' | xargs); echo \"\$base sessions:\"; echo; tmux list-sessions -F '#{session_name}' 2>/dev/null | grep \"^\${base}\" | while read s; do ppath=\$(tmux display-message -t \"\$s\" -p '#{pane_current_path}' 2>/dev/null | sed 's|/home/hacker/VibeCoding/work/|work/|;s|/home/hacker/VibeCoding/clients/|clients/|;s|/home/hacker|~|'); cmd=\$(tmux list-panes -t \"\$s\" -F '#{pane_current_command}' 2>/dev/null | head -1); echo \"  \$s  (\$cmd)  \$ppath\"; done" \
         --preview-window=down,40%,wrap \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:0:bold,bg+:7,hl+:1:bold:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
     [ -z "$selected" ] && return 0
 
@@ -1111,7 +1111,7 @@ fi
         --bind "ctrl-p:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh -1)" \
         --preview="$PREVIEW_CMD" \
         --preview-window=down,40%,~2,follow \
-        --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
+        --color="fg:-1,bg:-1,hl:-1:underline,fg+:0:bold,bg+:7,hl+:1:bold:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
     KEY=$(echo "$SELECTED" | head -1)
     CHOICE=$(echo "$SELECTED" | tail -1)
@@ -1186,7 +1186,7 @@ fi
             --no-multi --reverse --no-info \
             --header="Select project  Enter=open  Esc=back" \
             --prompt="" --pointer=" " --border=none \
-            --color="fg:-1,bg:-1,hl:-1:underline,fg+:-1:bold:reverse,bg+:-1,hl+:-1:bold:reverse:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
+            --color="fg:-1,bg:-1,hl:-1:underline,fg+:0:bold,bg+:7,hl+:1:bold:underline,info:-1,prompt:-1,pointer:-1,marker:-1,spinner:-1,header:-1:dim,border:-1,preview-fg:-1,preview-bg:-1,gutter:-1")
 
         [ -z "$PROJ_SELECTED" ] && continue
 
