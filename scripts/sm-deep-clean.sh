@@ -3,7 +3,7 @@
 # Only touches caches that regenerate on demand. Never touches user data:
 #   ~/.claude-mem (memory DB)         — preserved
 #   ~/.claude/projects (history)      — preserved
-#   /home/hacker/VibeCoding (code)    — preserved (only build caches inside)
+#   $HOME/{VibeCoding,projects,code,…}   — preserved (only build caches inside)
 #   node_modules root dirs            — preserved (only their .cache/)
 #
 # What it cleans:
@@ -58,15 +58,23 @@ step "electron cache" rm -rf "$HOME/.cache/electron"
 step "google-chrome cache" rm -rf "$HOME/.cache/google-chrome"
 step "claude-cli-nodejs cache" rm -rf "$HOME/.cache/claude-cli-nodejs"
 
-# Per-project build caches across VibeCoding (node_modules/.cache, .next/cache, .turbo, .eslintcache, tsbuildinfo)
+# Per-project build caches across the user's project roots (auto-detected).
+# Looks under common dev folders — falls back gracefully if a folder doesn't exist.
 project_clean() {
-    find /home/hacker/VibeCoding -maxdepth 6 \
-        \( -path '*/node_modules/.cache' \
-        -o -path '*/.next/cache' \
-        -o -name '.turbo' \
-        -o -name '.eslintcache' \
-        \) -exec rm -rf {} + 2>/dev/null
-    find /home/hacker/VibeCoding -maxdepth 6 -name 'tsconfig.tsbuildinfo' -delete 2>/dev/null
+    local roots=(
+        "$HOME/VibeCoding" "$HOME/projects" "$HOME/code"
+        "$HOME/work"       "$HOME/dev"      "$HOME/repos" "$HOME/src"
+    )
+    for r in "${roots[@]}"; do
+        [ -d "$r" ] || continue
+        find "$r" -maxdepth 6 \
+            \( -path '*/node_modules/.cache' \
+            -o -path '*/.next/cache' \
+            -o -name '.turbo' \
+            -o -name '.eslintcache' \
+            \) -exec rm -rf {} + 2>/dev/null
+        find "$r" -maxdepth 6 -name 'tsconfig.tsbuildinfo' -delete 2>/dev/null
+    done
     return 0
 }
 step "project build caches (.next, .turbo, …)" project_clean

@@ -35,7 +35,7 @@ fi
 
 # Path + git on same line
 CPATH=$(tmux display-message -t "$SESSION" -p '#{pane_current_path}' 2>/dev/null)
-SHORT_PATH=$(echo "$CPATH" | sed "s|/home/hacker/VibeCoding/work/|work/|;s|/home/hacker/VibeCoding/clients/|clients/|;s|/home/hacker/VibeCoding/1-life/|life/|;s|/home/hacker|~|")
+SHORT_PATH=$(echo "$CPATH" | sed "s|^$HOME/|~/|;s|^$HOME\$|~|")
 STATUS+="  │  $SHORT_PATH"
 if [ -n "$CPATH" ] && [ -d "$CPATH/.git" ]; then
     BRANCH=$(git -C "$CPATH" branch --show-current 2>/dev/null)
