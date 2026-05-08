@@ -661,6 +661,8 @@ while true; do
     NOW_S=$(date +%s)
     CACHE_AGE=999
     [ -f "$CACHE_TS_FILE" ] && CACHE_AGE=$((NOW_S - $(stat -c %Y "$CACHE_TS_FILE" 2>/dev/null || echo 0)))
+    # § (--render) is an explicit on-demand refresh — always force fresh detect
+    [ "$SM_RENDER_MODE" = "list" ] && CACHE_AGE=999
 
     if [ "$CACHE_AGE" -ge 2 ]; then
         # Cache stale → drop old per-session files, run parallel detect into cache
