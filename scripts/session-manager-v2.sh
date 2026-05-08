@@ -873,17 +873,19 @@ if [ "$VIEW" = "sessions" ]; then
             [ "$has_blocked" -eq 1 ] && warn_glyph="⚠"
             printf -v progress_field "[%s] %3d%% %s" "$pbar" "$pct" "$warn_glyph"
         fi
-        # Packed right-side: bar + progress + ram + age + branch all together
-        # at a FIXED position relative to the name. No flex gap → all columns
-        # land at the SAME visual position across every row, regardless of
-        # popup width. Trailing whitespace fills the rest of the popup.
-        printf -v right_cols "%-8s  %s    %5s %6s %10s" \
-            "$bar" "$progress_field" "$col_ram" "$age" "$col_branch"
+        # Two halves: name+bar+progress (left) | flex gap | ram+age+branch (flush right at popup edge).
+        # Aligns the right trio with the cpu/ram/disk stats in the header.
+        printf -v left_half "%-8s  %s" "$bar" "$progress_field"
+        printf -v far_right "%5s %6s %10s" "$col_ram" "$age" "$col_branch"
 
-        # Layout: prefix(8) + name(NAME_MAX) + 4sp + bar(8) + 2sp + progress(19) + 4sp + ram(5) + 1sp + age(6) + 1sp + branch(10)
-        # The 4-space gap between name and bar gives a "slight right offset"
-        # so bars don't crowd long session names.
-        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}    ${right_cols}"$'\t'"${sname}"
+        # Total visible cols = TERM_W - 4 (popup border margin):
+        #   prefix(8) + (deco+tname+pad = NAME_MAX) + 4sp + left_half(29) + GAP + far_right(23)
+        EFFECTIVE_W=$((TERM_W - 4))
+        gap_n=$((EFFECTIVE_W - 8 - NAME_MAX - 4 - 29 - 23))
+        [ "$gap_n" -lt 1 ] && gap_n=1
+        gap=$(printf '%*s' "$gap_n" "")
+
+        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}    ${left_half}${gap}${far_right}"$'\t'"${sname}"
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
         # Killed entries (prole=4, only present in historique view) are visible but
@@ -1055,7 +1057,7 @@ fi
     tab_visible=$(printf '%s' "$TAB_LINE1" | sed 's/\x1b\[[0-9;]*m//g')
     tab_w=$(LC_ALL=C.UTF-8 awk -v s="$tab_visible" 'BEGIN{print length(s)}')
     stats_w=${#STATS_STR}
-    target_w=$((TERM_W - 2))
+    target_w=$((TERM_W - 4))      # match popup margin so stats never get cut off
     pad_n=$((target_w - tab_w - stats_w))
     [ "$pad_n" -lt 3 ] && pad_n=3
     pad=$(printf '%*s' "$pad_n" "")
