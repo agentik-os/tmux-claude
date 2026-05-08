@@ -1105,7 +1105,7 @@ fi
         --border=none \
         --delimiter=$'\t' \
         --with-nth=1 \
-        --bind "load:pos($CURRENT_LINE)" \
+        --bind "start:pos($CURRENT_LINE)" \
         --bind "§:refresh-preview+reload($RELOAD_CMD)" \
         --bind "tab:transform(/home/hacker/.tmux/scripts/sm-tab-next.sh)" \
         --bind "down:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh +1)" \
