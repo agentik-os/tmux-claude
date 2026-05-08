@@ -13,7 +13,7 @@ categorize() {
         echo "work"
     elif [[ "$path" == *"/VibeCoding/clients/"* ]]; then
         echo "clients"
-    elif [[ "$path" == *"/VibeCoding/agentic-os/"* ]]; then
+    elif [[ "$path" == *"/VibeCoding/work/"* ]]; then
         echo "agentik"
     elif [[ "$path" == *"/VibeCoding/1-life"* ]]; then
         echo "life"
@@ -56,6 +56,86 @@ attach_session() {
         # Outside tmux - attach
         tmux attach -t "$name"
     fi
+}
+
+PROJECTS_CONF="$HOME/.config/tmux-claude/projects.conf"
+
+# Read project registry (skip blank/comment lines)
+list_projects() {
+    [ -f "$PROJECTS_CONF" ] || return 0
+    grep -vE '^\s*(#|$)' "$PROJECTS_CONF"
+}
+
+# n1 — fresh Claude at /home/hacker
+spawn_claude_root() {
+    local name="ClaudeRoot"
+    local i=2
+    while tmux has-session -t "$name" 2>/dev/null; do
+        name="ClaudeRoot-$i"; ((i++))
+    done
+    tmux new-session -d -s "$name" -c "$HOME"
+    tmux set-environment -t "$name" -u ANTHROPIC_API_KEY
+    tmux set-option -t "$name" remain-on-exit on
+    tmux send-keys -t "$name" "claude --dangerously-skip-permissions" Enter
+    attach_session "$name"
+}
+
+# n3 — fresh shell at /home/hacker (no claude)
+spawn_shell_root() {
+    local name="ShellRoot"
+    local i=2
+    while tmux has-session -t "$name" 2>/dev/null; do
+        name="ShellRoot-$i"; ((i++))
+    done
+    tmux new-session -d -s "$name" -c "$HOME"
+    attach_session "$name"
+}
+
+# n2 — pick a project from the registry, hand off to tmux-project
+show_project_picker() {
+    while true; do
+        clear
+        echo ""
+        echo -e "  ${BOLD}Open Project${RESET}"
+        echo ""
+        local i=1
+        local current_cat=""
+        local entries=()
+        while IFS='|' read -r name path cat; do
+            [ -z "$name" ] && continue
+            if [ "$cat" != "$current_cat" ]; then
+                [ -n "$current_cat" ] && echo ""
+                echo -e "  ${DIM}$cat${RESET}"
+                current_cat="$cat"
+            fi
+            local missing=""
+            [ -d "$path" ] || missing=" ${RED}(missing)${RESET}"
+            printf "  ${YELLOW}%2d${RESET}) %-22s ${DIM}%s${RESET}%s\n" "$i" "$name" "$path" "$missing"
+            entries+=("$name|$path")
+            ((i++))
+        done < <(list_projects)
+        echo ""
+        echo -e "  ${DIM}─────${RESET}"
+        echo -e "  ${YELLOW}q${RESET}) Back"
+        echo ""
+        echo -n "  > "
+        read -r pick
+        case "$pick" in
+            q|Q|"") return ;;
+            [0-9]*)
+                if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "${#entries[@]}" ]; then
+                    local entry="${entries[$((pick-1))]}"
+                    local pname="${entry%%|*}"
+                    local ppath="${entry#*|}"
+                    if [ ! -d "$ppath" ]; then
+                        echo -e "  ${RED}Path missing — edit ${PROJECTS_CONF}${RESET}"
+                        sleep 2; continue
+                    fi
+                    exec tmux-project "$pname" "$ppath"
+                fi
+                ;;
+        esac
+    done
 }
 
 show_menu() {
@@ -113,6 +193,8 @@ show_menu() {
     echo ""
     echo -e "  ${DIM}─────${RESET}"
     echo ""
+    printf "  ${YELLOW}n1${RESET} %-15s ${YELLOW}n2${RESET} %-15s ${YELLOW}n3${RESET} %-15s\n" "Claude @root" "Open project" "Shell @root"
+    echo ""
     printf "  ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s ${YELLOW}c${RESET} %-10s\n" "Delete" "Kill all" "Clean RAM"
     printf "  ${YELLOW}r${RESET} %-10s ${YELLOW}u${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Refresh" "Usage" "Quit"
     echo ""
@@ -134,11 +216,25 @@ main() {
                     exit 0
                 fi
                 ;;
-            [1-9])
-                local target=$(echo "$all_sessions" | sed -n "${choice}p")
-                if [ -n "$target" ]; then
-                    attach_session "$target"
-                    exit 0
+            n1|N1)
+                spawn_claude_root
+                exit 0
+                ;;
+            n2|N2)
+                show_project_picker
+                ;;
+            n3|N3)
+                spawn_shell_root
+                exit 0
+                ;;
+            [0-9]*)
+                # Accept any number (1, 2, ..., 10, 11, etc.)
+                if [[ "$choice" =~ ^[0-9]+$ ]]; then
+                    local target=$(echo "$all_sessions" | sed -n "${choice}p")
+                    if [ -n "$target" ]; then
+                        attach_session "$target"
+                        exit 0
+                    fi
                 fi
                 ;;
             d|D)

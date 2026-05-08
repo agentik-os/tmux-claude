@@ -4,6 +4,15 @@
 # Enter=switch  x=kill  .=protect  §=refresh  Esc=close
 # ══════════════════════════════════════════════════════════════
 
+# Render-only mode for fzf `reload(...)` action — outputs DISPLAY_LIST to stdout
+# and exits before the fzf invocation. Used by the § bind to refresh in-place.
+SM_RENDER_MODE=""
+if [ "${1:-}" = "--render" ]; then
+    SM_RENDER_MODE="list"
+    shift
+    VIEW_ARG="${1:-sessions}"
+fi
+
 CURRENT_SESSION=$(tmux display-message -p '#S')
 NOW=$(date +%s)
 TMPDIR_SM="/tmp/.sm-$$"
@@ -48,33 +57,51 @@ TERM_W=$(tput cols 2>/dev/null || echo 80)
 # Left prefix cost: 2-space indent + marker(1) + space + icon(1) + space + protect(1) + space = 8
 # Double-space after name = 2
 # Total fixed = 34 → NAME_MAX = TERM_W - 34
-NAME_MAX=$((TERM_W - 34))
+NAME_MAX=$((TERM_W - 65))    # age bar (8) + progress bar+% (19) + ram (5) + age (6) + branch (10) + gutters
 [ "$NAME_MAX" -lt 18 ] && NAME_MAX=18
 [ "$NAME_MAX" -gt 60 ] && NAME_MAX=60
 PATH_MAX=$((TERM_W - 60))
 [ "$PATH_MAX" -lt 8 ] && PATH_MAX=8
 
+# short_name: when a session is rendered inside a tree (its project parent is
+# already visible above), strip the redundant project prefix from the display.
+# The full session name is still preserved in the hidden TAB field for
+# tmux switch-client and for search.
+short_name() {
+    local name="$1" pkey="$2"
+    [ -z "$pkey" ] && { REPLY="$name"; return; }
+    case "$name" in
+        oracle-"${pkey}")          REPLY="oracle"; return ;;
+        oracle-"${pkey}"-*)        REPLY="oracle-${name#oracle-${pkey}-}"; return ;;
+        "${pkey}"-oracle)          REPLY="oracle"; return ;;
+        "${pkey}"-oracle-*)        REPLY="oracle-${name#${pkey}-oracle-}"; return ;;
+        "${pkey}"-worker-*)        REPLY="${name#${pkey}-}"; return ;;
+    esac
+    REPLY="$name"
+}
+
+# All helper functions write to $REPLY (bash convention) — eliminates the
+# subshell fork from $(func "$arg") in hot loops. ~10× speed-up at scale.
 truncate_str() {
     local str="$1" max="$2"
     if [ "${#str}" -gt "$max" ]; then
-        echo "${str:0:$((max-1))}…"
+        REPLY="${str:0:$((max-1))}…"
     else
-        echo "$str"
+        REPLY="$str"
     fi
 }
 
 # truncate_smart: keep right side if mode=start (preserves ticket IDs like CAU-95).
-# Used for worker names: Causio-worker-1-CAU-95 → …-CAU-95 instead of Causio-worker…
 truncate_smart() {
     local str="$1" max="$2" mode="${3:-end}"
     if [ "${#str}" -le "$max" ]; then
-        echo "$str"
+        REPLY="$str"
         return
     fi
     if [ "$mode" = "start" ]; then
-        echo "…${str: -$((max-1))}"
+        REPLY="…${str: -$((max-1))}"
     else
-        echo "${str:0:$((max-1))}…"
+        REPLY="${str:0:$((max-1))}…"
     fi
 }
 
@@ -85,22 +112,75 @@ RST=$'\033[0m'
 
 human_time() {
     local secs=$1
-    if [ "$secs" -lt 60 ]; then echo "${secs}s"
-    elif [ "$secs" -lt 3600 ]; then echo "$((secs/60))m"
-    elif [ "$secs" -lt 86400 ]; then echo "$((secs/3600))h$((secs%3600/60))m"
-    else echo "$((secs/86400))d$((secs%86400/3600))h"
+    if   [ "$secs" -lt 60 ];    then REPLY="${secs}s"
+    elif [ "$secs" -lt 3600 ];  then REPLY="$((secs/60))m"
+    elif [ "$secs" -lt 86400 ]; then REPLY="$((secs/3600))h$((secs%3600/60))m"
+    else                              REPLY="$((secs/86400))d$((secs%86400/3600))h"
     fi
+}
+
+# Bulk-load AISB progress state for ALL sessions in one bash pass — avoids N jq
+# forks per render. Populates the global PROGRESS_STATE assoc array, keyed by
+# session name. Value: "<done>/<total>" or "<done>/<total>⚠" (any blocked todo).
+load_all_progress() {
+    unset PROGRESS_STATE 2>/dev/null
+    declare -gA PROGRESS_STATE
+    shopt -s nullglob
+    local pfile base sname total done_n has_blocked v line
+    for pfile in "$HOME/.aisb/state/oracle-"*.progress.json "$HOME/.aisb/state/worker-"*.progress.json; do
+        base="${pfile##*/}"; base="${base%.progress.json}"
+        sname="${base#oracle-}"; sname="${sname#worker-}"
+        total=""; done_n=""; has_blocked=0
+        while IFS= read -r line; do
+            case "$line" in
+                *'"todos_total"'*)
+                    v="${line#*:}"; v="${v%%,*}"; total="${v// /}" ;;
+                *'"todos_completed"'*)
+                    v="${line#*:}"; v="${v%%,*}"; done_n="${v// /}" ;;
+                *'"status": "blocked"'*|*'"status":"blocked"'*)
+                    has_blocked=1 ;;
+            esac
+        done < "$pfile"
+        if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
+            if [ "$has_blocked" -eq 1 ]; then
+                PROGRESS_STATE[$sname]="${done_n}/${total}⚠"
+            else
+                PROGRESS_STATE[$sname]="${done_n}/${total}"
+            fi
+        fi
+    done
+    shopt -u nullglob
+}
+
+# 8-char age bar — log-ish scale on 0..24h.
+#   <5min=1 ▰ | <15min=2 | <1h=3 | <3h=4 | <8h=5 | <12h=6 | <24h=7 | >=24h=8
+age_bar() {
+    local secs="${1:-0}" n=0
+    if   [ "$secs" -lt 300 ];   then n=1
+    elif [ "$secs" -lt 900 ];   then n=2
+    elif [ "$secs" -lt 3600 ];  then n=3
+    elif [ "$secs" -lt 10800 ]; then n=4
+    elif [ "$secs" -lt 28800 ]; then n=5
+    elif [ "$secs" -lt 43200 ]; then n=6
+    elif [ "$secs" -lt 86400 ]; then n=7
+    else                              n=8
+    fi
+    local out="" i=0
+    while [ "$i" -lt 8 ]; do
+        if [ "$i" -lt "$n" ]; then out+="▰"; else out+="▱"; fi
+        i=$((i+1))
+    done
+    REPLY="$out"
 }
 
 human_mb() {
     local kb=$1
-    if [ "$kb" -lt 1024 ]; then echo "${kb}K"
-    elif [ "$kb" -lt 1048576 ]; then echo "$((kb/1024))M"
+    if   [ "$kb" -lt 1024 ];    then REPLY="${kb}K"
+    elif [ "$kb" -lt 1048576 ]; then REPLY="$((kb/1024))M"
     else
-        # Integer math instead of bc fork: X.Yg with 1 decimal
         local g=$((kb / 1048576))
         local d=$(( (kb % 1048576) * 10 / 1048576 ))
-        echo "${g}.${d}G"
+        REPLY="${g}.${d}G"
     fi
 }
 
@@ -309,33 +389,48 @@ classify_session() {
 # AISB-bot              → _system
 project_key() {
     local name="$1"
-    [[ "$name" == earthbit* ]] && { echo "_system"; return; }
-    [[ "$name" == AISB-* ]]    && { echo "_system"; return; }
-    [[ "$name" == Home* ]]     && { echo "Home"; return; }
-    [[ "$name" == c-* ]]       && { echo "Home"; return; }
-    # oracle-X or oracle-X-N → X
+    case "$name" in
+        earthbit*) REPLY="_system"; return ;;
+        AISB-*)    REPLY="_system"; return ;;
+        Home*)     REPLY="Home"; return ;;
+        c-*)       REPLY="Home"; return ;;
+    esac
     if [[ "$name" == oracle-* ]]; then
         local stripped="${name#oracle-}"
-        # Strip trailing -N (oracle duplicates)
         stripped="${stripped%-[0-9]}"
         stripped="${stripped%-[0-9][0-9]}"
-        echo "$stripped"
+        REPLY="$stripped"
         return
     fi
-    # Worker: take first token before first `-`
-    echo "${name%%-*}"
+    REPLY="${name%%-*}"
 }
 
-# ── Role within a project (for oracle-first ordering) ──
-# 0 = oracle, 1 = worker, 2 = home, 3 = system
 project_role() {
-    local name="$1"
-    [[ "$name" == oracle-* ]]  && { echo 0; return; }
-    [[ "$name" == Home* ]]     && { echo 2; return; }
-    [[ "$name" == c-* ]]       && { echo 2; return; }
-    [[ "$name" == earthbit* ]] && { echo 3; return; }
-    [[ "$name" == AISB-* ]]    && { echo 3; return; }
-    echo 1
+    case "$1" in
+        oracle-*)   REPLY=0 ;;
+        *-oracle)   REPLY=0 ;;
+        *-oracle-*) REPLY=0 ;;
+        Home*)      REPLY=2 ;;
+        c-*)        REPLY=2 ;;
+        earthbit*)  REPLY=3 ;;
+        AISB-*)     REPLY=3 ;;
+        *)          REPLY=1 ;;
+    esac
+}
+
+oracle_idx() {
+    case "$1" in
+        oracle-*-[0-9]|oracle-*-[0-9][0-9])  REPLY="${1##*-}"; return ;;
+        oracle-*)                             REPLY="1"; return ;;
+        *-oracle-[0-9]|*-oracle-[0-9][0-9])  REPLY="${1##*-}"; return ;;
+        *-oracle)                             REPLY="1"; return ;;
+    esac
+    if [[ "$1" == *-worker-* ]]; then
+        local rest="${1#*-worker-}"
+        local idx="${rest%%-*}"
+        if [[ "$idx" =~ ^[0-9]+$ ]]; then REPLY="$idx"; return; fi
+    fi
+    REPLY="1"
 }
 
 # ── Show kill history ──
@@ -354,50 +449,52 @@ show_history() {
 
 show_help() {
     local help_text=""
-    help_text+="  SESSION MANAGER v4 — Keyboard Shortcuts"
+    help_text+="  SESSION MANAGER — Keyboard Shortcuts"
     help_text+=$'\n'"  ──────────────────────────────────────────"
     help_text+=$'\n'""
+    help_text+=$'\n'"  Tabs"
+    help_text+=$'\n'"  ← or <       Previous tab"
+    help_text+=$'\n'"  → or >       Next tab (sessions ↔ historique ↔ menu)"
+    help_text+=$'\n'""
     help_text+=$'\n'"  Navigation"
-    help_text+=$'\n'"  ↑/↓          Move between sessions (skips blanks)"
-    help_text+=$'\n'"  Tab          Cycle to next section (home/work/clients/system)"
-    help_text+=$'\n'"  ⇧Tab         New ClaudeRoot session at \$HOME"
-    help_text+=$'\n'"  Enter        Switch to selected session"
+    help_text+=$'\n'"  ↑ / ↓        Move between sessions (skips blanks + headers)"
+    help_text+=$'\n'"  Tab          Jump to next project group"
+    help_text+=$'\n'"  ⇧Tab         Spawn new ClaudeRoot session at \$HOME"
+    help_text+=$'\n'"  Enter        Switch to selected session / run menu action"
     help_text+=$'\n'"  Esc          Close this menu"
     help_text+=$'\n'""
     help_text+=$'\n'"  Session Actions"
     help_text+=$'\n'"  x            Kill selected session"
     help_text+=$'\n'"  .            Toggle kill protection (§)"
-    help_text+=$'\n'""
-    help_text+=$'\n'"  Preview"
     help_text+=$'\n'"  §            Refresh preview pane"
     help_text+=$'\n'""
     help_text+=$'\n'"  Status Icons"
     help_text+=$'\n'"  ●  working   Claude is actively running"
     help_text+=$'\n'"  ○  idle      Claude at prompt, waiting"
     help_text+=$'\n'"  ·  shell     No Claude in this session"
-    help_text+=$'\n'"  §  protected  Immune to orphan-killer & x"
+    help_text+=$'\n'"  §  protected Immune to orphan-killer & x"
     help_text+=$'\n'""
-    help_text+=$'\n'"  Groups"
-    help_text+=$'\n'"  Home         Home-*, c-* sessions"
-    help_text+=$'\n'"  Oracles      oracle-* (project managers)"
-    help_text+=$'\n'"  Workers      Dispatched work sessions"
-    help_text+=$'\n'"  System       earthbit, AISB-*"
+    help_text+=$'\n'"  Tree Glyphs (oracle + workers grouping)"
+    help_text+=$'\n'"  ├ / └        Worker belongs to the oracle above"
+    help_text+=$'\n'"               (drawn only when group has both oracle and worker)"
+    help_text+=$'\n'""
+    help_text+=$'\n'"  Project Groups"
+    help_text+=$'\n'"  Home         Home, Home-2, c-* (interactive sessions)"
+    help_text+=$'\n'"  <Project>    Each project gets its own header (Causio, Kommu, …)"
+    help_text+=$'\n'"  system       earthbit-*, AISB-* (orchestration daemons)"
+    help_text+=$'\n'""
+    help_text+=$'\n'"  Menu Tab Actions (open with > > or via tab nav)"
+    help_text+=$'\n'"  open project Pick a project from projects.json"
+    help_text+=$'\n'"  clean RAM    Drop caches + clear /tmp junk"
+    help_text+=$'\n'"  kill all     Kill every session except current"
     help_text+=$'\n'""
     help_text+=$'\n'"  Auto-Protect"
     help_text+=$'\n'"  Working sessions are auto-protected."
-    help_text+=$'\n'"  After 10min idle, protection is removed."
+    help_text+=$'\n'"  After 10 min idle, protection is removed."
     help_text+=$'\n'"  Manual . override is respected."
     help_text+=$'\n'""
-    help_text+=$'\n'"  Status Bar (bottom-right)"
-    help_text+=$'\n'"  D            Disk usage (root partition)"
-    help_text+=$'\n'"  C            CPU load"
-    help_text+=$'\n'"  R            RAM usage"
-    help_text+=$'\n'"  T            Tunnel status (SSH/Chrome debug)"
-    help_text+=$'\n'""
-    help_text+=$'\n'"  Bottom Menu"
-    help_text+=$'\n'"  > open project   Pick a project from projects.json"
-    help_text+=$'\n'"  ~ clean RAM      Drop caches + clear /tmp junk"
-    help_text+=$'\n'"  x kill all       Kill every session except current"
+    help_text+=$'\n'"  Status Bar (top right)"
+    help_text+=$'\n'"  cpu / ram / disk percentages, total RAM consumed by sessions"
 
     echo "$help_text" | fzf \
         --no-multi --reverse --no-info --disabled \
@@ -422,7 +519,7 @@ show_close_menu() {
         for s in $sessions; do
             [ "$s" = "$CURRENT_SESSION" ] && marker=">" && break
         done
-        local tbase=$(truncate_str "$base" 22)
+        truncate_str "$base" 22; local tbase="$REPLY"
         printf -v line "%s  %-22s  %d session%s" "$marker" "$tbase" "$count" "$([ $count -gt 1 ] && echo 's' || echo '')"
         [ -n "$menu" ] && menu="${menu}"$'\n'"${line}" || menu="${line}"
     done
@@ -466,12 +563,46 @@ extract_name() {
     case "$line" in
         *$'\t'*) printf '%s' "${line##*$'\t'}"; return ;;
     esac
-    echo "$line" | awk '{for(i=1;i<=NF;i++){if($i!=">" && $i!="*" && $i!="●" && $i!="○" && $i!="·" && $i!="§" && $i!="├" && $i!="└" && $i!="L" && $i!="🔒"){print $i; exit}}}'
+    echo "$line" | awk '{for(i=1;i<=NF;i++){if($i!=">" && $i!="*" && $i!="●" && $i!="○" && $i!="·" && $i!="§" && $i!="│" && $i!="├" && $i!="└" && $i!="✗" && $i!="L" && $i!="🔒"){print $i; exit}}}'
 }
 
 # ══════════════════════════════════════════
 # ── Main loop ──
 # ══════════════════════════════════════════
+
+# Top-level view. Switch with ←/→ or </>
+VIEW="${VIEW_ARG:-sessions}"   # sessions | historique | menu | help
+
+# Render the tab bar — browser-style underline (Option C).
+# Two lines: labels on top, heavy ━━━ underline only beneath the active label.
+# No boxes, no borders → minimalist, modern. Active label is bold + underlined.
+render_tabs() {
+    local active="$1"
+    local bold=$'\033[1m' rst=$'\033[0m'
+    local labels=("sessions" "historique" "menu" "help")
+    local gap="     "   # 5-space gap between labels
+    local line1="" line2=""
+    local first=1
+    for label in "${labels[@]}"; do
+        if [ $first -eq 0 ]; then
+            line1+="$gap"
+            line2+="$gap"
+        fi
+        first=0
+        local n=${#label}
+        local underline="" pad="" i=0
+        while [ "$i" -lt "$n" ]; do underline+="━"; pad+=" "; i=$((i+1)); done
+        if [ "$label" = "$active" ]; then
+            line1+="${bold}${label}${rst}"
+            line2+="${bold}${underline}${rst}"
+        else
+            line1+="$label"
+            line2+="$pad"
+        fi
+    done
+    printf '%s\n%s' "$line1" "$line2"
+}
+
 while true; do
     # Instant CPU from /proc/stat (was top -bn1 = 250ms fork)
     CPU=$(awk '/^cpu /{t=$2+$3+$4+$5+$6+$7+$8+$9; i=$5+$6; printf "%.0f", (1-i/t)*100}' /proc/stat 2>/dev/null)
@@ -492,33 +623,61 @@ while true; do
     tmux list-panes -a -F '#{session_name}	#{pane_pid}	#{pane_current_command}	#{pane_current_path}' 2>/dev/null > "$PANES_SNAP"
     export PANES_SNAP
 
+    # ── Pre-aggregate panes count + first pane path per session in ONE awk pass ──
+    # Eliminates 2 awk forks PER SESSION in Pass 1.
+    unset SESSION_PANE_COUNT SESSION_PANE_PATH 2>/dev/null
+    declare -A SESSION_PANE_COUNT SESSION_PANE_PATH
+    while IFS=$'\t' read -r _s _c _p; do
+        SESSION_PANE_COUNT[$_s]=$_c
+        SESSION_PANE_PATH[$_s]=$_p
+    done < <(awk -F'\t' '
+        { cnt[$1]++; if (!path[$1]) path[$1] = $4 }
+        END { for (s in cnt) printf "%s\t%d\t%s\n", s, cnt[s], path[s] }
+    ' "$PANES_SNAP")
+
     # Parallel detection: claude status + RAM
     while IFS='|' read -r sname _rest; do
         detect_claude_status "$sname" "$TMPDIR_SM/$sname.status" &
         get_session_ram "$sname" "$TMPDIR_SM/$sname.ram" &
     done <<< "$SESSION_DATA"
+    # Bulk-load AISB progress while detection runs in background → free perf
+    load_all_progress
     wait
 
+    # Common stats / state used by all views
+    TOTAL_RAM=0; CURRENT_LINE=1
+    SECTION_POS=""; DATA_LINES=""
+    # Project header rule width — extend across the full popup width (no cap).
+    # Subtract small margin (4) for popup borders/padding.
+    SEP_W=$((TERM_W - 4))
+    [ "$SEP_W" -lt 30 ] && SEP_W=30
+
+if [ "$VIEW" = "sessions" ]; then
     # ── Pass 1: Collect raw fields per session (line built in Pass 2 with tree info) ──
     TAGGED_LINES=""
-    CURRENT_LINE=1
-    TOTAL_W=0; TOTAL_I=0; TOTAL_SHELL=0; TOTAL_PROTECTED=0; TOTAL_RAM=0
-    unset PKEY_COUNT 2>/dev/null; declare -A PKEY_COUNT
+    TOTAL_W=0; TOTAL_I=0; TOTAL_SHELL=0; TOTAL_PROTECTED=0
+    unset PKEY_COUNT PKEY_HAS_ORACLE PKEY_HAS_WORKER 2>/dev/null
+    unset SUB_COUNT SUB_HAS_ORACLE SUB_HAS_WORKER 2>/dev/null
+    declare -A PKEY_COUNT PKEY_HAS_ORACLE PKEY_HAS_WORKER
+    declare -A SUB_COUNT SUB_HAS_ORACLE SUB_HAS_WORKER
 
     while IFS='|' read -r name wins attached activity created; do
         [ -z "$name" ] && continue
         # Hide transient launcher sessions (e.g. `_menu` spawned by c-menu outside tmux)
         [[ "$name" == _* ]] && continue
-        panes=$(awk -F'\t' -v s="$name" '$1==s{c++}END{print c+0}' "$PANES_SNAP" 2>/dev/null)
+        panes=${SESSION_PANE_COUNT[$name]:-0}
 
         # Marker
         marker=" "
         [ "$name" = "$CURRENT_SESSION" ] && marker=">"
         [ "$attached" = "1" ] && [ "$name" != "$CURRENT_SESSION" ] && marker="*"
 
-        # Age
-        age=""
-        [ -n "$created" ] && [ "$created" -gt 0 ] 2>/dev/null && age=$(human_time $((NOW-created)))
+        # Age (formatted) + age in seconds
+        age=""; age_secs=0
+        if [ -n "$created" ] && [ "$created" -gt 0 ] 2>/dev/null; then
+            age_secs=$((NOW-created))
+            human_time "$age_secs"; age="$REPLY"
+        fi
 
         # Protection badge (§ = 1-col BMP, guaranteed alignment)
         protect_icon=" "
@@ -541,55 +700,57 @@ while true; do
         fi
 
         # RAM
-        ram_str=""
+        ram_str=""; ram_kb=0
         if [ -f "$TMPDIR_SM/$name.ram" ]; then
-            ram_kb=$(cat "$TMPDIR_SM/$name.ram")
+            read -r ram_kb < "$TMPDIR_SM/$name.ram"
             TOTAL_RAM=$((TOTAL_RAM + ram_kb))
-            [ "$ram_kb" -gt 100000 ] && ram_str=$(human_mb "$ram_kb")
+            if [ "$ram_kb" -gt 100000 ]; then human_mb "$ram_kb"; ram_str="$REPLY"; fi
         fi
 
-        # Git branch only (path removed from display) — pane_path from batched snapshot
-        pane_path=$(awk -F'\t' -v s="$name" '$1==s{print $4; exit}' "$PANES_SNAP" 2>/dev/null)
+        # Git branch (cheap HEAD file read) — pane_path from pre-aggregated map
+        pane_path="${SESSION_PANE_PATH[$name]:-}"
         branch=""
-        # Cheap git branch read: HEAD file, no git fork
         if [ -n "$pane_path" ] && [ -f "$pane_path/.git/HEAD" ]; then
             head_ref=""
             read -r head_ref < "$pane_path/.git/HEAD" 2>/dev/null
             [ "${head_ref#ref: refs/heads/}" != "$head_ref" ] && branch="${head_ref#ref: refs/heads/}"
         fi
 
-        col_ram=""
-        [ -n "$ram_str" ] && col_ram="$ram_str"
-
+        col_ram="${ram_str}"
         col_branch=""
-        [ -n "$branch" ] && col_branch=$(truncate_str "$branch" 10)
+        if [ -n "$branch" ]; then truncate_str "$branch" 10; col_branch="$REPLY"; fi
 
-        # Composite sort key: SECTION|PROJECT|ROLE|NAME
-        # SECTION: 1=home, 2=work, 3=clients, 4=life, 5=aisb
-        # PROJECT: project key (oracle+workers of same project stay grouped)
-        # ROLE:    0=oracle, 1=worker, 2=home, 3=system (oracle first within project)
-        # NAME:    session name (deterministic tiebreaker)
-        pkey=$(project_key "$name")
-        prole=$(project_role "$name")
-        pcat=$(project_category "$pkey")
-        case "$pcat" in
-            home)    section=1 ;;
-            work)    section=2 ;;
-            clients) section=3 ;;
-            life)    section=4 ;;
-            aisb)    section=5 ;;
-            *)       section=5 ;;
+        # Sort key: SECTION|PROJECT|ROLE|NAME — REPLY-style helpers, no fork.
+        project_key "$name"; pkey="$REPLY"
+        project_role "$name"; prole="$REPLY"
+        case "$pkey" in
+            Home)    section=1 ;;
+            _system) section=3 ;;
+            *)       section=2 ;;
         esac
-        # Track project group size — drives tree decoration in Pass 2
-        PKEY_COUNT[$pkey]=$((${PKEY_COUNT[$pkey]:-0}+1))
+        oracle_idx "$name"; oidx="$REPLY"
+        sub_key="${pkey}::${oidx}"
 
-        # Emit raw fields for Pass 2 to assemble. ram_kb retained for >1G warning.
-        TAGGED_LINES+="${section}|${pkey}|${prole}|${name}|${marker}|${status_icon}|${protect_icon}|${col_ram}|${age}|${col_branch}|${ram_kb:-0}"$'\n'
+        PKEY_COUNT[$pkey]=$((${PKEY_COUNT[$pkey]:-0}+1))
+        [ "$prole" = "0" ] && PKEY_HAS_ORACLE[$pkey]=1
+        [ "$prole" = "1" ] && PKEY_HAS_WORKER[$pkey]=1
+
+        SUB_COUNT[$sub_key]=$((${SUB_COUNT[$sub_key]:-0}+1))
+        [ "$prole" = "0" ] && SUB_HAS_ORACLE[$sub_key]=1
+        [ "$prole" = "1" ] && SUB_HAS_WORKER[$sub_key]=1
+
+        # Sort key now includes oracle_idx so sub-groups stay contiguous.
+        # AISB orchestration progress (X/Y todos) — pre-loaded into PROGRESS_STATE
+        # in one pass at the top of the loop. Lookup is O(1), no fork.
+        progress_str="${PROGRESS_STATE[$name]:-}"
+
+        # Field order: section|pkey|oidx|prole|name|marker|sicon|picon|ram|age|branch|ram_kb|age_secs|progress
+        TAGGED_LINES+="${section}|${pkey}|${oidx}|${prole}|${name}|${marker}|${status_icon}|${protect_icon}|${col_ram}|${age}|${col_branch}|${ram_kb:-0}|${age_secs:-0}|${progress_str}"$'\n'
     done <<< "$SESSION_DATA"
 
-    # ── Pass 2: Sort, then iterate with lookahead to build display lines ──
-    # (lookahead drives tree decoration: ├ if a sibling worker follows, └ if last)
-    SORTED=$(echo "$TAGGED_LINES" | sort -t'|' -k1,1 -k2,2 -k3,3n -k4,4)
+    # ── Pass 2: Sort by section → pkey → oracle_idx → role → name ──
+    # The oracle_idx column keeps each oracle's workers grouped under that oracle.
+    SORTED=$(echo "$TAGGED_LINES" | sort -t'|' -k1,1 -k2,2 -k3,3n -k4,4n -k5,5)
     mapfile -t SORTED_ARR <<< "$SORTED"
     N=${#SORTED_ARR[@]}
 
@@ -603,72 +764,82 @@ while true; do
     for ((idx=0; idx<N; idx++)); do
         line_data="${SORTED_ARR[$idx]}"
         [ -z "$line_data" ] && continue
-        IFS='|' read -r section pkey prole sname marker sicon picon col_ram age col_branch ram_kb <<< "$line_data"
+        IFS='|' read -r section pkey oidx prole sname marker sicon picon col_ram age col_branch ram_kb age_secs progress_str <<< "$line_data"
         [ -z "$section" ] && continue
+        sub_key="${pkey}::${oidx}"
 
-        # ── Section header on transition ──
-        if [ "$section" != "$PREV_SECTION" ]; then
-            if [ -n "$PREV_SECTION" ]; then
+        # ── Project header (Option E: flush-left label + hairline rule to width) ──
+        if [ "$pkey" != "$PREV_PKEY" ]; then
+            if [ -n "$PREV_PKEY" ]; then
                 DISPLAY_LIST+=" "$'\n'
                 LINE_NUM=$((LINE_NUM + 1))
             fi
-            case "$section" in
-                1) sec_label="home" ;;
-                2) sec_label="work" ;;
-                3) sec_label="clients" ;;
-                4) sec_label="life" ;;
-                5) sec_label="aisb" ;;
-                *) sec_label="other" ;;
+            case "$pkey" in
+                Home)    sec_label="Home" ;;
+                _system) sec_label="system" ;;
+                *)       sec_label="$pkey" ;;
             esac
-            DISPLAY_LIST+="  ── ${sec_label} ──"$'\n'
+            # Header line: "Causio ─────────────…" (label flush-left, no indent)
+            trail_cols=$((SEP_W - ${#sec_label} - 1))
+            [ "$trail_cols" -lt 0 ] && trail_cols=0
+            trail=""; _i=0
+            while [ "$_i" -lt "$trail_cols" ]; do trail+="─"; _i=$((_i+1)); done
+            DISPLAY_LIST+="${sec_label} ${trail}"$'\n'
             LINE_NUM=$((LINE_NUM + 1))
-            SECTION_POS+="$((LINE_NUM + 1)) "  # next line will be the first session of this section
-        elif [ -n "$PREV_PKEY" ] && [ "$pkey" != "$PREV_PKEY" ]; then
-            DISPLAY_LIST+=" "$'\n'
-            LINE_NUM=$((LINE_NUM + 1))
+            SECTION_POS+="$((LINE_NUM + 1)) "  # first session of this project
         fi
 
-        # ── Tree decoration ──
-        # Root (oracle, first in group): "┬ " at indent 0  → 2 cols
-        # Children (workers etc):        "  ├ " or "  └ "  → 4 cols (2-space indent + connector)
-        # The 2-space indent visually nests workers under their oracle.
+        # ── Tree decoration (per sub-group: oracle + ITS workers) ──
+        # Drawn only when the (pkey, oracle_idx) sub-group has BOTH oracle and worker.
+        # Multi-oracle projects: each oracle's workers nest under that oracle, not
+        # all-workers-of-the-project.
         deco=""
         deco_cols=0
-        if [ "${PKEY_COUNT[$pkey]:-0}" -gt 1 ]; then
-            prev_pkey_arr=""
+        has_tree=0
+        if [ "${SUB_HAS_ORACLE[$sub_key]:-0}" = "1" ] && [ "${SUB_HAS_WORKER[$sub_key]:-0}" = "1" ]; then
+            has_tree=1
+        fi
+        if [ "$prole" != "4" ] && [ "$has_tree" = "1" ] && [ "${SUB_COUNT[$sub_key]:-0}" -gt 1 ]; then
+            # Compare sub_key (pkey + oidx) with neighbors, not just pkey
+            prev_sub=""
             if [ $idx -gt 0 ]; then
-                IFS='|' read -r _ prev_pkey_arr _ _ _ _ _ _ _ _ _ <<< "${SORTED_ARR[$((idx-1))]}"
+                IFS='|' read -r _ p_pkey p_oidx _ _ _ _ _ _ _ _ _ <<< "${SORTED_ARR[$((idx-1))]}"
+                prev_sub="${p_pkey}::${p_oidx}"
             fi
-            next_pkey=""
+            next_sub=""
             if [ $((idx+1)) -lt $N ]; then
-                IFS='|' read -r _ next_pkey _ _ _ _ _ _ _ _ _ <<< "${SORTED_ARR[$((idx+1))]}"
+                IFS='|' read -r _ n_pkey n_oidx _ _ _ _ _ _ _ _ _ <<< "${SORTED_ARR[$((idx+1))]}"
+                next_sub="${n_pkey}::${n_oidx}"
             fi
-            if [ "$prev_pkey_arr" != "$pkey" ]; then
-                deco="┬ "                # root
-                deco_cols=2
-            elif [ "$next_pkey" != "$pkey" ]; then
-                deco="  └ "               # last child (indented under parent)
+            if [ "$prev_sub" != "$sub_key" ]; then
+                deco=""                   # root oracle of this sub-group
+                deco_cols=0
+            elif [ "$next_sub" != "$sub_key" ]; then
+                deco="  └ "                # last child (indented under parent oracle)
                 deco_cols=4
             else
-                deco="  ├ "               # middle child
+                deco="  ├ "                # middle child
                 deco_cols=4
             fi
         fi
 
-        # ── Smart truncate: workers reverse-truncate (preserve ticket ID), others normal ──
+        # Display name: strip redundant project prefix (REPLY-style, no fork)
+        short_name "$sname" "$pkey"; display_name="$REPLY"
+
+        # Smart truncate: workers reverse-truncate, others normal
         avail=$((NAME_MAX - deco_cols))
         if [ "$prole" = "1" ]; then
-            tname=$(truncate_smart "$sname" "$avail" "start")
+            truncate_smart "$display_name" "$avail" "start"
         else
-            tname=$(truncate_smart "$sname" "$avail" "end")
+            truncate_smart "$display_name" "$avail" "end"
         fi
+        tname="$REPLY"
 
-        # Pad name to fill (NAME_MAX - deco_cols) display columns
-        # NB: tree chars are 3 bytes each (UTF-8) but 1 display column → can't use ${#tname}
-        # for the visible width when reverse-truncated with leading "…" (also 3 bytes / 1 col).
-        # Strategy: count visible chars by stripping multi-byte → keep simple via char count
-        # (LC_ALL=C wc -m approximates well for our ASCII names + at most one "…").
-        visible_cols=$(LC_ALL=C.UTF-8 awk -v s="$tname" 'BEGIN{print length(s)}')
+        # Pad name to fill (NAME_MAX - deco_cols) display columns.
+        # truncate_smart adds at most ONE "…" (U+2026, 3 bytes / 1 col) → bytes - 2 = visible cols
+        # when ellipsis is present. Avoids forking awk per session line.
+        visible_cols=${#tname}
+        case "$tname" in *…*) visible_cols=$((visible_cols - 2)) ;; esac
         name_spaces=$((avail - visible_cols))
         [ "$name_spaces" -lt 0 ] && name_spaces=0
         pad_name=$(printf "%-${name_spaces}s" "")
@@ -678,36 +849,214 @@ while true; do
             col_ram="${RED}${col_ram}${RST}"
         fi
 
-        printf -v right_cols "%-5s %-6s %-10s" "$col_ram" "$age" "$col_branch"
+        # Age bar (8) + AISB progress field (19, fixed) + RAM + age + branch.
+        age_bar "${age_secs:-0}"; bar="$REPLY"
+        progress_field=$(printf '%19s' "")
+        if [ -n "$progress_str" ]; then
+            has_blocked=0
+            ps_clean="$progress_str"
+            case "$ps_clean" in *⚠) has_blocked=1; ps_clean="${ps_clean%⚠}" ;; esac
+            done_n="${ps_clean%%/*}"
+            total_n="${ps_clean##*/}"
+            pct=0
+            [ "${total_n:-0}" -gt 0 ] 2>/dev/null && pct=$((done_n * 100 / total_n))
+            filled=$((pct * 10 / 100))
+            [ "$filled" -gt 10 ] && filled=10
+            pbar=""
+            for ((i=0; i<10; i++)); do
+                if [ "$i" -lt "$filled" ]; then pbar+="━"; else pbar+="─"; fi
+            done
+            warn_glyph=" "
+            [ "$has_blocked" -eq 1 ] && warn_glyph="⚠"
+            printf -v progress_field "[%s] %3d%% %s" "$pbar" "$pct" "$warn_glyph"
+        fi
+        # ram / age / branch right-aligned (flush to popup right edge), like the top-right stats.
+        printf -v right_cols "%-8s  %s  %5s %6s %10s" "$bar" "$progress_field" "$col_ram" "$age" "$col_branch"
 
         # Append full session name as hidden trailing field (after TAB).
         # fzf shows only field 1 via --with-nth, but the full name survives in $CHOICE
         # so extract_name returns the untruncated value for tmux switch-client.
-        line="${marker} ${sicon} ${picon} ${deco}${tname}${pad_name}  ${right_cols}"$'\t'"${sname}"
+        line="${marker} ${sicon} ${picon} │ ${deco}${tname}${pad_name}  ${right_cols}"$'\t'"${sname}"
         DISPLAY_LIST+="${line}"$'\n'
         LINE_NUM=$((LINE_NUM + 1))
-        DATA_LINES+="${LINE_NUM} "  # selectable session line — used by skip-nav helper
-        [ "$sname" = "$CURRENT_SESSION" ] && CURRENT_LINE=$LINE_NUM
+        # Killed entries (prole=4, only present in historique view) are visible but
+        # not navigable via skip-nav — switch-client would fail anyway.
+        if [ "$prole" != "4" ]; then
+            DATA_LINES+="${LINE_NUM} "
+            [ "$sname" = "$CURRENT_SESSION" ] && CURRENT_LINE=$LINE_NUM
+        fi
 
         PREV_SECTION="$section"
         PREV_PKEY="$pkey"
     done
 
-    # Remove trailing blank, add separator + actions
+    # Remove trailing blank, no footer (actions moved to "menu" tab)
     DISPLAY_LIST=$(echo -n "$DISPLAY_LIST" | sed '/^$/d')
 
-    SEP_W=$((TERM_W - 4))
-    [ "$SEP_W" -gt 60 ] && SEP_W=60
-    SEP=$(printf '─%.0s' $(seq 1 "$SEP_W"))
+elif [ "$VIEW" = "historique" ]; then
+    # Historique view: list killed sessions grouped by project, newest first.
+    # Press Enter on any entry → recreates the tmux session at the project's path
+    # so you can resume work where you left off.
+    unset HIST_BY_PKEY 2>/dev/null
+    declare -A HIST_BY_PKEY
+    if [ -s "$HISTORY_FILE" ]; then
+        while IFS= read -r kentry; do
+            ktime=$(printf '%s' "$kentry" | awk -F' \\| ' '{print $1}')
+            kname=$(printf '%s' "$kentry" | awk -F' \\| ' '{print $2}')
+            kreason=$(printf '%s' "$kentry" | awk -F' \\| ' '{print $3}')
+            [ -z "$kname" ] && continue
+            project_key "$kname"; kpkey="$REPLY"
+            HIST_BY_PKEY[$kpkey]+="${ktime}|${kname}|${kreason}"$'\n'
+        done < "$HISTORY_FILE"
+    fi
 
-    TOTAL_RAM_STR=$(human_mb "$TOTAL_RAM")
+    DISPLAY_LIST=" "$'\n'
+    LINE_NUM=1
+    DATA_LINES=""
+    CURRENT_LINE=1
 
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'" "
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"${SEP}"
-    DISPLAY_LIST="${DISPLAY_LIST}"$'\n'"   > open project    ~ clean RAM    x kill all"
+    if [ ${#HIST_BY_PKEY[@]} -eq 0 ]; then
+        DISPLAY_LIST+="  (no killed sessions yet — kill some and they'll appear here)"$'\n'
+    else
+        # Order: Home first, _system last, others alpha
+        ordered=()
+        [ -n "${HIST_BY_PKEY[Home]:-}" ] && ordered+=("Home")
+        for k in $(printf '%s\n' "${!HIST_BY_PKEY[@]}" | sort); do
+            [ "$k" = "Home" ] || [ "$k" = "_system" ] && continue
+            ordered+=("$k")
+        done
+        [ -n "${HIST_BY_PKEY[_system]:-}" ] && ordered+=("_system")
 
-    # Header: stats + key bar (one line)
-    HEADER="${TOTAL_RAM_STR}  cpu ${CPU}%  ram ${RAM}%  disk ${DISK}  │  [?]help"
+        first_proj=1
+        for pkey in "${ordered[@]}"; do
+            sec_label="$pkey"
+            [ "$pkey" = "_system" ] && sec_label="system"
+            if [ $first_proj -eq 0 ]; then
+                DISPLAY_LIST+=" "$'\n'
+                LINE_NUM=$((LINE_NUM + 1))
+            fi
+            first_proj=0
+            # Project header (Option E flush-left rule)
+            trail_cols=$((SEP_W - ${#sec_label} - 1))
+            [ "$trail_cols" -lt 0 ] && trail_cols=0
+            trail=""; _i=0
+            while [ "$_i" -lt "$trail_cols" ]; do trail+="─"; _i=$((_i+1)); done
+            DISPLAY_LIST+="${sec_label} ${trail}"$'\n'
+            LINE_NUM=$((LINE_NUM + 1))
+
+            # Entries newest first (history file is appended chronologically)
+            entries="${HIST_BY_PKEY[$pkey]}"
+            while IFS='|' read -r ktime kname kreason; do
+                [ -z "$kname" ] && continue
+                short_name "$kname" "$pkey"; short="$REPLY"
+                avail=$((NAME_MAX))
+                case "$kname" in
+                    *-worker-*) truncate_smart "$short" "$avail" "start" ;;
+                    *)          truncate_smart "$short" "$avail" "end" ;;
+                esac
+                tn="$REPLY"
+                vc=$(LC_ALL=C.UTF-8 awk -v s="$tn" 'BEGIN{print length(s)}')
+                ns=$((avail - vc))
+                [ "$ns" -lt 0 ] && ns=0
+                pn=$(printf "%-${ns}s" "")
+                # Layout: ✗ space space space │ space name pad  time(5) reason(rest)
+                # Matches sessions visual "marker sicon picon │ name" (sicon/picon blank for killed)
+                printf -v line_text "✗     │ %s%s  %-7s %s" "$tn" "$pn" "$ktime" "${kreason:-killed}"
+                DISPLAY_LIST+="${line_text}"$'\t'"${kname}"$'\n'
+                LINE_NUM=$((LINE_NUM + 1))
+                DATA_LINES+="${LINE_NUM} "
+                [ "$CURRENT_LINE" -eq 1 ] && CURRENT_LINE=$LINE_NUM   # focus first entry
+            done <<< "$(echo "$entries" | tac)"
+        done
+    fi
+
+elif [ "$VIEW" = "menu" ]; then
+    # Menu view: action buttons. Each line is selectable; CHOICE-grep handlers
+    # in the main loop trigger the action.
+    DISPLAY_LIST=" "$'\n'
+    DISPLAY_LIST+="  open project          pick a project from projects.json"$'\n'
+    DISPLAY_LIST+="  clean cache           drop kernel cache + /tmp junk (fast)"$'\n'
+    DISPLAY_LIST+="  deep clean            heavy disk reclaim — npm/bun/pnpm/playwright/electron/journal/apt"$'\n'
+    DISPLAY_LIST+="  clean history         wipe kill log + protection state"$'\n'
+    DISPLAY_LIST+="  kill all              kill every session except the current one"$'\n'
+    DATA_LINES="2 3 4 5 6"
+    CURRENT_LINE=2
+
+elif [ "$VIEW" = "help" ]; then
+    # Help view: keyboard shortcuts + status icon legend, fully searchable.
+    DISPLAY_LIST=""
+    add_help_line() {
+        DISPLAY_LIST+="${1}"$'\n'
+        HELP_LN=$((HELP_LN+1))
+        # Mark non-blank lines as data so down/up skip blank rows
+        case "$1" in *[!\ ]*) DATA_LINES+="${HELP_LN} " ;; esac
+    }
+    HELP_LN=0
+    add_help_line " "
+    add_help_line "  Tabs"
+    add_help_line "    ← / <        previous tab"
+    add_help_line "    → / >        next tab  (sessions ↔ historique ↔ menu ↔ help)"
+    add_help_line " "
+    add_help_line "  Navigation"
+    add_help_line "    ↑ / ↓        move between sessions (skips blanks + headers)"
+    add_help_line "    Tab          jump to next project group"
+    add_help_line "    ⇧Tab         spawn new ClaudeRoot session at \$HOME"
+    add_help_line "    Enter        switch to selected session / run menu action"
+    add_help_line "    Esc          close menu"
+    add_help_line " "
+    add_help_line "  Session actions"
+    add_help_line "    x            kill selected session"
+    add_help_line "    .            toggle kill protection (§ icon)"
+    add_help_line "    §            refresh in-place — reloads list (progress, age, RAM) + preview"
+    add_help_line "    ?            jump to this help tab"
+    add_help_line " "
+    add_help_line "  Status icons (column 2 of each session line)"
+    add_help_line "    ●  working   Claude is actively running"
+    add_help_line "    ○  idle      Claude at prompt, waiting for input"
+    add_help_line "    ·  shell     no Claude in this session"
+    add_help_line "    §  pinned    immune to orphan-killer and 'x' kill"
+    add_help_line "    >  current   the session you are attached to"
+    add_help_line "    *  attached  an attached client other than yours"
+    add_help_line "    ✗  killed    historique view — session was closed"
+    add_help_line " "
+    add_help_line "  Tree glyphs (workers under their oracle)"
+    add_help_line "    ├ / └        worker child of the oracle directly above"
+    add_help_line "                 (drawn only when group has both oracle and worker)"
+    add_help_line " "
+    add_help_line "  Project groups"
+    add_help_line "    Home         Home, Home-2, c-* (interactive sessions)"
+    add_help_line "    <Project>    one header per project (Causio, Kommu, …)"
+    add_help_line "    system       earthbit-*, AISB-* (orchestration daemons)"
+    add_help_line " "
+    add_help_line "  Auto-protect"
+    add_help_line "    Working sessions are auto-protected. After 10 min idle,"
+    add_help_line "    protection is removed. Manual '.' override is respected."
+    CURRENT_LINE=2
+    unset -f add_help_line
+
+fi
+
+    human_mb "$TOTAL_RAM"; TOTAL_RAM_STR="$REPLY"
+
+    # Header: tabs (left) + stats (right) on line 1, underline on line 2.
+    TAB_BAR=$(render_tabs "$VIEW")
+    TAB_LINE1=$(printf '%s' "$TAB_BAR" | sed -n '1p')
+    TAB_LINE2=$(printf '%s' "$TAB_BAR" | sed -n '2p')
+    STATS_STR="cpu ${CPU}%   ram ${RAM}%   disk ${DISK}   ${TOTAL_RAM_STR}"
+
+    # Compute right-aligned padding (visible chars only — strip ANSI from tab line)
+    tab_visible=$(printf '%s' "$TAB_LINE1" | sed 's/\x1b\[[0-9;]*m//g')
+    tab_w=$(LC_ALL=C.UTF-8 awk -v s="$tab_visible" 'BEGIN{print length(s)}')
+    stats_w=${#STATS_STR}
+    target_w=$((TERM_W - 2))
+    pad_n=$((target_w - tab_w - stats_w))
+    [ "$pad_n" -lt 3 ] && pad_n=3
+    pad=$(printf '%*s' "$pad_n" "")
+
+    HEADER=" "$'\n'
+    HEADER+="${TAB_LINE1}${pad}${STATS_STR}"$'\n'
+    HEADER+="${TAB_LINE2}"$'\n'
+    HEADER+=" "
 
     # Persist line numbers used by fzf bind helpers
     echo "$SECTION_POS" > /tmp/.sm-sections        # Tab section-cycle
@@ -715,7 +1064,18 @@ while true; do
     echo 0 > /tmp/.sm-section-cursor
 
     # Preview command — skip menu items (open project / clean RAM / kill all / separators / group headers)
-    PREVIEW_CMD='line={}; if echo "$line" | grep -qE "^[[:space:]]*$|─────|── |open project|clean RAM|kill all"; then echo ""; else session=$(echo "$line" | grep -oP "(?<=\s)[A-Za-z][A-Za-z0-9_-]*" | head -1); [ -n "$session" ] && '"$HOME"'/.tmux/scripts/session-preview.sh "$session" "'"$TMPDIR_SM"'"; fi'
+    # Preview: {2} = the hidden tab field that holds the full session name.
+    # Empty for headers / blank lines / menu actions → no preview shown.
+    PREVIEW_CMD='sess={2}; [ -n "$sess" ] && '"$HOME"'/.tmux/scripts/session-preview.sh "$sess" "'"$TMPDIR_SM"'"'
+
+    # Render-only mode: dump DISPLAY_LIST to stdout (used by `reload(...)` bind on §)
+    if [ "$SM_RENDER_MODE" = "list" ]; then
+        printf '%s' "$DISPLAY_LIST"
+        exit 0
+    fi
+
+    # Bind §: reload list in-place + refresh preview pane (no popup flash)
+    RELOAD_CMD="$HOME/.tmux/scripts/session-manager-v2.sh --render $VIEW"
 
     SELECTED=$(echo "$DISPLAY_LIST" | fzf \
         --ansi \
@@ -725,14 +1085,14 @@ while true; do
         --no-separator \
         --header-first \
         --header="$HEADER" \
-        --expect="x,.,?,shift-tab" \
+        --expect="x,.,?,shift-tab,<,>,left,right" \
         --pointer=" " \
-        --prompt="search > " \
+        --prompt="  search > " \
         --border=none \
         --delimiter=$'\t' \
         --with-nth=1 \
         --bind "load:pos($CURRENT_LINE)" \
-        --bind "§:refresh-preview" \
+        --bind "§:refresh-preview+reload($RELOAD_CMD)" \
         --bind "tab:transform(/home/hacker/.tmux/scripts/sm-tab-next.sh)" \
         --bind "down:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh +1)" \
         --bind "up:transform(/home/hacker/.tmux/scripts/sm-skip-nav.sh -1)" \
@@ -745,13 +1105,39 @@ while true; do
     KEY=$(echo "$SELECTED" | head -1)
     CHOICE=$(echo "$SELECTED" | tail -1)
 
-    [ -z "$CHOICE" ] && exit 0
-    echo "$CHOICE" | grep -q '─────' && continue
-    echo "$CHOICE" | grep -q '── ' && continue  # skip group headers
+    # Tab cycling: ← / < = previous, → / > = next
+    case "$KEY" in
+        "<"|"left")
+            case "$VIEW" in
+                sessions)   VIEW=help ;;
+                historique) VIEW=sessions ;;
+                menu)       VIEW=historique ;;
+                help)       VIEW=menu ;;
+            esac
+            continue ;;
+        ">"|"right")
+            case "$VIEW" in
+                sessions)   VIEW=historique ;;
+                historique) VIEW=menu ;;
+                menu)       VIEW=help ;;
+                help)       VIEW=sessions ;;
+            esac
+            continue ;;
+    esac
 
-    # "?" key = show help
+    [ -z "$CHOICE" ] && exit 0
+    # Real session/historique lines carry a trailing TAB + full name. Anything
+    # without a TAB is a header / blank / separator → skip. Menu actions also
+    # have no tab but are detected by their literal text below.
+    case "$CHOICE" in
+        *$'\t'*) ;;  # session or historique entry — proceed
+        *'open project'*|*'clean cache'*|*'deep clean'*|*'clean history'*|*'kill all'*) ;;  # menu action
+        *) continue ;;  # header / blank / decorative
+    esac
+
+    # "?" key = jump to help tab
     if [ "$KEY" = "?" ]; then
-        show_help
+        VIEW="help"
         continue
     fi
 
@@ -819,11 +1205,25 @@ while true; do
         exit 0
     fi
 
-    # Action: clean RAM
-    if echo "$CHOICE" | grep -q 'clean RAM'; then
+    # Action: clean cache (fast — kernel page cache + /tmp junk)
+    if echo "$CHOICE" | grep -q 'clean cache'; then
         sync
         echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1
-        rm -rf /tmp/.maniac-* /tmp/browser-screenshots/* /tmp/.sm-* 2>/dev/null
+        rm -rf /tmp/.maniac-* /tmp/browser-screenshots/* /tmp/sm-test* 2>/dev/null
+        continue
+    fi
+
+    # Action: deep clean (heavy disk reclaim — runs script with progress + pause)
+    if echo "$CHOICE" | grep -q 'deep clean'; then
+        clear
+        bash "$HOME/.tmux/scripts/sm-deep-clean.sh"
+        continue
+    fi
+
+    # Action: clean history (wipe kill log + protection state)
+    if echo "$CHOICE" | grep -q 'clean history'; then
+        clear
+        bash "$HOME/.tmux/scripts/sm-clean-history.sh"
         continue
     fi
 
@@ -866,6 +1266,36 @@ while true; do
             kill_with_history "$TARGET" "manual"
         fi
         continue
+    fi
+
+    # ── Historique view: Enter recreates the killed session at its project path ──
+    if [ "$VIEW" = "historique" ] && [ -n "$TARGET" ]; then
+        # If somehow it's already alive, just switch
+        if tmux has-session -t "$TARGET" 2>/dev/null; then
+            tmux switch-client -t "$TARGET"
+            exit 0
+        fi
+        project_key "$TARGET"; rpkey="$REPLY"
+        rpath=""
+        case "$rpkey" in
+            Home)    rpath="$HOME" ;;
+            _system) clear; echo "  System sessions can't be reopened from history."; sleep 2; continue ;;
+            *)
+                PROJECTS_DB="/home/hacker/VibeCoding/work/agentik-monitor/bot/projects.json"
+                if [ -f "$PROJECTS_DB" ] && command -v jq >/dev/null 2>&1; then
+                    rpath=$(jq -r --arg n "$rpkey" '.projects[$n].path // empty' "$PROJECTS_DB" 2>/dev/null)
+                fi
+                [ -z "$rpath" ] && rpath="$HOME"
+                ;;
+        esac
+        if [ ! -d "$rpath" ]; then
+            clear; echo "  Project path missing: $rpath"; sleep 2; continue
+        fi
+        tmux new-session -d -s "$TARGET" -c "$rpath"
+        tmux set-environment -t "$TARGET" -u ANTHROPIC_API_KEY
+        tmux set-option -t "$TARGET" remain-on-exit on
+        tmux switch-client -t "$TARGET"
+        exit 0
     fi
 
     # Enter = switch to session

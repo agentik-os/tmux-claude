@@ -53,7 +53,13 @@ get_default_port() {
 NOTIFY_FILE="$HOME/.config/tmux-notify-state"
 
 get_sessions() {
-    tmux list-sessions -F "#{session_name}|#{session_created}|#{session_windows}" 2>/dev/null | grep "^${SESSION_BASE}" | sort
+    if [ "$NO_CLAUDE" = true ]; then
+        # HOME MODE: show ALL sessions
+        tmux list-sessions -F "#{session_name}|#{session_created}|#{session_windows}" 2>/dev/null | sort
+    else
+        # PROJECT MODE: show only project sessions (exact name or name-N)
+        tmux list-sessions -F "#{session_name}|#{session_created}|#{session_windows}" 2>/dev/null | grep -E "^${SESSION_BASE}(\||$|-[0-9])" | sort
+    fi
 }
 
 count_sessions() {
@@ -78,7 +84,7 @@ get_git_info() {
             local now=$(date +%s)
             local diff=$((now - last_ts))
             if [ $diff -lt 3600 ]; then
-                last_push="${diff}m"
+                last_push="$((diff / 60))m"
             elif [ $diff -lt 86400 ]; then
                 last_push="$((diff / 3600))h"
             else
@@ -147,78 +153,19 @@ get_bg_tasks() {
     pgrep -c -f "claude.*background" 2>/dev/null || echo "0"
 }
 
-# Get sessions from OTHER projects (for Home mode)
-get_other_sessions() {
-    tmux list-sessions -F "#{session_name}|#{session_created}" 2>/dev/null | grep -v "^${SESSION_BASE}" | sort
-}
-
-# Handle other sessions menu (Home mode)
-handle_other_sessions() {
-    clear
-    echo ""
-    echo -e "  ${BOLD}Other Sessions${RESET}"
-    echo ""
-
-    local others=$(get_other_sessions)
-    if [ -n "$others" ]; then
-        local i=1
-        while IFS='|' read -r name created; do
-            [ -z "$name" ] && continue
-            local time=$(date -d "@$created" "+%H:%M" 2>/dev/null || echo "??:??")
-            echo -e "  ${YELLOW}$i${RESET}) $name ${DIM}$time${RESET}"
-            ((i++))
-        done <<< "$others"
-    else
-        echo -e "  ${DIM}No other sessions${RESET}"
-    fi
-
-    echo ""
-    echo -e "  ${YELLOW}d${RESET}) Delete one session"
-    echo -e "  ${YELLOW}k${RESET}) Kill ALL other sessions"
-    echo ""
-    echo -e "  ${YELLOW}q${RESET}) Back"
-    echo ""
-
-    echo -n "  > "
-    read -r choice
-
-    case "$choice" in
-        [1-9])
-            local target=$(echo "$others" | sed -n "${choice}p" | cut -d'|' -f1)
-            if [ -n "$target" ]; then
-                attach_session "$target"
-                exit 0
-            fi
-            ;;
-        d|D)
-            echo -n "  delete #: "
-            read -r num
-            local target=$(echo "$others" | sed -n "${num}p" | cut -d'|' -f1)
-            if [ -n "$target" ]; then
-                tmux kill-session -t "$target"
-                echo "  Killed $target"
-                sleep 1
-            fi
-            ;;
-        k|K)
-            echo "$others" | cut -d'|' -f1 | while read name; do
-                [ -n "$name" ] && tmux kill-session -t "$name" 2>/dev/null
-            done
-            echo "  Killed"
-            sleep 1
-            ;;
-        q|Q|"") return ;;
-    esac
-}
-
 
 next_session_name() {
-    local count=$(count_sessions)
-    if [ "$count" -eq 0 ]; then
+    # First session: no suffix
+    if ! tmux has-session -t "$SESSION_BASE" 2>/dev/null; then
         echo "$SESSION_BASE"
-    else
-        echo "${SESSION_BASE}-$((count + 1))"
+        return
     fi
+    # Find next available number (skip existing names)
+    local i=2
+    while tmux has-session -t "${SESSION_BASE}-${i}" 2>/dev/null; do
+        ((i++))
+    done
+    echo "${SESSION_BASE}-${i}"
 }
 
 # Attach or switch depending on context
@@ -253,6 +200,13 @@ create_session_bare() {
     fi
 
     tmux new-session -d -s "$name" -c "$PROJECT_PATH"
+
+    # 2026-05-07: Scrub ANTHROPIC_API_KEY so Claude Code uses OAuth from
+    # ~/.claude/.credentials.json (Telegram /account is the source of truth).
+    tmux set-environment -t "$name" -u ANTHROPIC_API_KEY
+
+    # Keep session alive if Claude Code exits/crashes — user can relaunch manually
+    tmux set-option -t "$name" remain-on-exit on
 
     # Set supermemory container if available
     if command -v supermemory &> /dev/null || [[ -n "$SUPERMEMORY_CC_API_KEY" ]]; then
@@ -518,6 +472,90 @@ handle_bg() {
     done
 }
 
+# Oracle menu
+show_oracle_menu() {
+    clear
+    local oracle_sess="oracle-${SESSION_BASE}"
+    local oracle_running=false
+    if tmux has-session -t "$oracle_sess" 2>/dev/null; then
+        oracle_running=true
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Oracle — ${SESSION_BASE}${RESET}"
+    echo -e "  Session: ${YELLOW}$oracle_sess${RESET}"
+    if $oracle_running; then
+        echo -e "  Status: ${GREEN}running${RESET}"
+    else
+        echo -e "  Status: ${RED}stopped${RESET}"
+    fi
+    echo ""
+    echo -e "  ${YELLOW}1${RESET}) Open Oracle (with system prompt)"
+    echo -e "  ${YELLOW}2${RESET}) Open Oracle in God Mode"
+    echo -e "  ${YELLOW}3${RESET}) View Oracle output (last 50 lines)"
+    echo -e "  ${YELLOW}4${RESET}) Kill Oracle"
+    echo ""
+    echo -e "  ${YELLOW}q${RESET}) Back"
+    echo ""
+}
+
+handle_oracle() {
+    local oracle_sess="oracle-${SESSION_BASE}"
+    while true; do
+        show_oracle_menu
+        echo -n "  > "
+        read -r choice
+        case "$choice" in
+            1)
+                # Open oracle with system prompt (same as o-xxx aliases)
+                "$HOME/.aisb/lib/oracle-open.sh" "$SESSION_BASE" "$PROJECT_PATH" "$SESSION_BASE"
+                exit 0
+                ;;
+            2)
+                # Open oracle in God Mode
+                echo -n "  Objectif God Mode: "
+                read -r goal
+                if [ -n "$goal" ]; then
+                    "$HOME/.aisb/lib/oracle-open.sh" "$SESSION_BASE" "$PROJECT_PATH" "$SESSION_BASE"
+                    sleep 4
+                    # Send god mode prompt
+                    local prompt="GOD MODE: $goal"
+                    local tmpfile=$(mktemp /tmp/oracle-gm-XXXXXX.txt)
+                    echo "$prompt" > "$tmpfile"
+                    tmux load-buffer "$tmpfile"
+                    tmux paste-buffer -t "$oracle_sess"
+                    sleep 0.3
+                    tmux send-keys -t "$oracle_sess" Enter
+                    rm -f "$tmpfile"
+                    echo "  God Mode launched!"
+                    sleep 1
+                    attach_session "$oracle_sess"
+                    exit 0
+                fi
+                ;;
+            3)
+                # View output
+                if tmux has-session -t "$oracle_sess" 2>/dev/null; then
+                    tmux capture-pane -t "$oracle_sess" -p -S -50
+                    echo ""
+                    echo -n "  Press Enter..."
+                    read
+                else
+                    echo "  Oracle not running"
+                    sleep 1
+                fi
+                ;;
+            4)
+                # Kill oracle
+                tmux kill-session -t "$oracle_sess" 2>/dev/null
+                echo "  Oracle killed"
+                sleep 1
+                ;;
+            q|Q|"") return ;;
+        esac
+    done
+}
+
 show_menu() {
     clear
     local git_info=$(get_git_info)
@@ -592,10 +630,7 @@ show_menu() {
     if [ "$NO_CLAUDE" = true ]; then
         # HOME MODE - simplified menu
         printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
-        printf "  ${YELLOW}o${RESET} %-10s ${YELLOW}u${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Others" "Usage" "Quit"
-        printf "  ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s\n" "Clean" "NUCLEAR"
-        echo ""
-        echo -e "  ${DIM}c = RAM + caches | x = kill ALL + clean ALL${RESET}"
+        printf "  ${YELLOW}q${RESET} %-10s\n" "Quit"
     else
         # PROJECT MODE - full menu
         printf "  ${YELLOW}n${RESET} %-10s ${YELLOW}d${RESET} %-10s ${YELLOW}k${RESET} %-10s\n" "New" "Delete" "Kill all"
@@ -604,9 +639,8 @@ show_menu() {
             printf "  ${YELLOW}p${RESET} %-10s ${YELLOW}g${RESET} %-10s ${YELLOW}s${RESET} %-10s\n" "Pull" "Push" "Sync"
         fi
 
-        printf "  ${YELLOW}v${RESET} %-10s ${YELLOW}i${RESET} %-10s ${YELLOW}b${RESET} %-10s\n" "Dev" "Init" "Background"
-        printf "  ${YELLOW}t${RESET} %-10s ${YELLOW}u${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Notif $notify" "Usage" "Quit"
-        printf "  ${YELLOW}c${RESET} %-10s ${YELLOW}x${RESET} %-10s\n" "Clean" "Nuclear"
+        printf "  ${YELLOW}v${RESET} %-10s ${YELLOW}i${RESET} %-10s ${YELLOW}o${RESET} %-10s\n" "Dev" "Init" "Oracle"
+        printf "  ${YELLOW}t${RESET} %-10s ${YELLOW}q${RESET} %-10s\n" "Notif $notify" "Quit"
     fi
     echo ""
 }
@@ -627,11 +661,14 @@ main() {
                     handle_new
                 fi
                 ;;
-            [2-9])
-                local target=$(get_sessions | sed -n "${choice}p" | cut -d'|' -f1)
-                if [ -n "$target" ]; then
-                    attach_session "$target"
-                    exit 0
+            [0-9]*)
+                # Accept any number (2, 3, ..., 10, 11, etc.)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -gt 1 ]; then
+                    local target=$(get_sessions | sed -n "${choice}p" | cut -d'|' -f1)
+                    if [ -n "$target" ]; then
+                        attach_session "$target"
+                        exit 0
+                    fi
                 fi
                 ;;
             n|N) handle_new ;;
@@ -662,7 +699,11 @@ main() {
                 ;;
             k|K)
                 get_sessions | cut -d'|' -f1 | xargs -I{} tmux kill-session -t {}
-                echo "  Killed"
+                if [ "$NO_CLAUDE" = true ]; then
+                    echo "  Killed ALL sessions"
+                else
+                    echo "  Killed $SESSION_BASE sessions"
+                fi
                 sleep 1
                 ;;
             p|P)
@@ -685,17 +726,11 @@ main() {
                 ;;
             v|V) handle_dev ;;
             i|I) handle_init ;;
-            b|B) handle_bg ;;
+            o|O) handle_oracle ;;
             t|T)
                 local new_state=$(toggle_notify)
                 echo "  Notifications: $new_state"
                 sleep 1
-                ;;
-            o|O)
-                # Other sessions (Home mode)
-                if [ "$NO_CLAUDE" = true ]; then
-                    handle_other_sessions
-                fi
                 ;;
             c|C)
                 echo "  Cleaning..."

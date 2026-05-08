@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 REPO_URL="https://raw.githubusercontent.com/agentik-os/tmux-claude/main"
 
 # Colors
@@ -99,7 +99,7 @@ else
     curl -fsSL "$REPO_URL/bin/tmux-nova" -o "$BIN_DIR/tmux-nova" 2>/dev/null || true
     curl -fsSL "$REPO_URL/bin/c-menu" -o "$BIN_DIR/c-menu" 2>/dev/null || true
 
-    for script in ram-usage cpu-usage disk-usage claude-account sessions-count bg-tasks git-branch last-push tunnel-status pomodoro session-manager session-manager-v2 session-preview sm-skip-nav sm-tab-next project-analyzer; do
+    for script in ram-usage cpu-usage disk-usage claude-account sessions-count bg-tasks git-branch last-push tunnel-status pomodoro session-manager session-manager-v2 session-preview sm-skip-nav sm-tab-next sm-deep-clean sm-clean-history project-analyzer; do
         curl -fsSL "$REPO_URL/scripts/${script}.sh" -o "$TMUX_SCRIPTS_DIR/${script}.sh" 2>/dev/null || true
     done
 

@@ -17,69 +17,76 @@ Requirements: `tmux 3.2+`, `fzf 0.40+`, `bash 4+` or `zsh`
 
 ## What You Get
 
-### Session Manager v4.1 (Ctrl+l / Ctrl+b z / Option+z)
+### Session Manager v3.1 (Ctrl+l / Ctrl+b z / Option+z)
 
-Fullscreen fzf popup showing every tmux session, grouped by category, with live Claude status, RAM usage, and a targeted preview:
+Fullscreen fzf popup with **4 tabs** (sessions / historique / menu / help), grouped per-project layout, live AISB orchestration progress, age bars, and CPU/RAM/disk stats top-right:
 
 ```
-12G  cpu 21%  ram 67%  disk 45%  │  ?=help
+sessions     historique     menu     help                  cpu 19%   ram 22%   disk 27%   3.6G
+━━━━━━━━
 
-── Home ──
-> ● § Home-4                       2.0G   21m
-  ○   Home                         2.1G   13h42m
 
-── Oracles ──
-  ○ § oracle-Causio                 782M  27m    main
-  ○ § oracle-DentistryGPT           1.2G  12m    main
-  ○   oracle-Causio-2               703M  12m    main
+Home ───────────────────────────────────────────────────────────────────────────────
+* ●   │ Home                       ▰▰▰▰▰▱▱▱                                  797M   6h42m
+> ● § │ Home-2                     ▰▰▰▰▱▱▱▱                                  744M   2h55m
 
-── Workers ──
-  ○ § DentistryGPT-verify-done      2.1G  11m    main
-  ●   Kommu-fix-auth                1.4G  4m     develop
+Causio ─────────────────────────────────────────────────────────────────────────────
+  ● § │ oracle                     ▰▰▰▱▱▱▱▱  [━━━━━─────]  50%               594M   41m    main
+  ● §   ├ worker-1-CAU-95          ▰▰▱▱▱▱▱▱  [████████──]  80%               590M   8m     main
+  ● §   └ worker-1-CAU-99          ▰▰▱▱▱▱▱▱  [█████████─]  86% ⚠             599M   8m     main
 
-────────────────────────────────────────
-   > open project
-   ~ clean RAM
-   x kill all
+DentistryGPT ───────────────────────────────────────────────────────────────────────
+  ○ § │ oracle-2                   ▰▰▱▱▱▱▱▱  [████░░░░░░]  38%               1.0G   25m    main
 ```
 
-**Per-session columns (strict fixed-width alignment):**
+**Tabs (cycle with `←` `→` or `<` `>`):**
+
+| Tab | Content |
+|-----|---------|
+| `sessions` | Live tmux sessions, grouped per-project, with tree (oracle + workers) |
+| `historique` | Killed sessions from `/tmp/.tmux-kill-history` — Enter recreates the session at the project's path |
+| `menu` | 5 actions (open project, clean cache, deep clean, clean history, kill all) |
+| `help` | Searchable keyboard shortcut reference |
+
+**Per-session columns (right-aligned, flush to popup edge):**
 | Column | Description |
 |--------|-------------|
 | `>` / `*` / ` ` | Current session / attached elsewhere / detached |
-| `●` / `○` / `·` | Claude working / idle at prompt / no Claude (shell) |
-| `§` / ` ` | Kill-protected / unprotected (immune to orphan-killer & `x` key) |
-| `Home-4` | Session name (padded to 24 cols, truncated with `…` if longer) |
-| `2.0G` | RAM usage of session process tree (hidden if < 100MB) |
-| `21m` | Session age |
-| `main` | Git branch (read directly from `.git/HEAD`, no git fork) |
+| `●` / `○` / `·` | Claude working / idle at prompt / shell only |
+| `§` / ` ` | Kill-protected / unprotected |
+| `│` | Status / name separator |
+| `oracle` / `worker-1-…` | Short name (project prefix stripped, ticket ID preserved via reverse-truncate) |
+| `▰▰▱▱▱▱▱▱` | 8-char age bar (log scale 0–24h) |
+| `[━━━━━─────] 50%` | AISB orchestration progress (heavy filled / light empty) — read from `~/.aisb/state/{oracle,worker}-<name>.progress.json`. `⚠` if any todo is `blocked` |
+| `594M` / `41m` / `main` | RAM / age / git branch |
 
-**Session groups (auto-sorted top → bottom):**
-1. **Home** — `Home*`, `c-*`
-2. **Oracles** — `oracle-*` (project managers)
-3. **Workers** — dispatched work sessions
-4. **System** — `earthbit*`, `AISB-*`
+**Project groups:** ordered Home first, projects alphabetical, system last. Each project gets its own flush-left header `Causio ─────...` extending to popup width.
+
+**Tree decoration:** `┬` on root oracle, `├ └` indented under it for worker children — drawn only when the (project, oracle_idx) sub-group has BOTH oracle AND worker.
 
 **Keybindings inside the popup:**
 | Key | Action |
 |-----|--------|
-| `↑/↓` | Navigate (skips blank separators and headers) |
-| `Tab` | Cycle to next section (home → work → clients → system) |
+| `↑/↓` | Navigate (skips blanks + headers) |
+| `Tab` | Jump to next project group |
 | `⇧Tab` | Spawn a fresh `ClaudeRoot` session at `$HOME` |
-| `Enter` | Switch to selected session |
-| `x` | Kill session (skipped if protected) |
+| `← / →` or `< / >` | Switch tabs (sessions ↔ historique ↔ menu ↔ help) |
+| `Enter` | Switch to session / run menu action / reopen killed session (historique) |
+| `x` | Kill session |
 | `.` | Toggle kill protection (§) |
-| `§` | Refresh preview |
-| `?` | Show help |
+| `§` | Refresh in-place — reload list (progress, age, RAM) + preview, cursor preserved |
+| `?` | Jump to help tab |
 | `Esc` | Close |
-| Type text | Filter/search |
+| Type text | Filter/search (matches both visible name and full session name) |
 
-**Bottom menu (3 actions):**
+**Menu tab actions:**
 | Item | Action |
 |------|--------|
-| `> open project` | Pick a project from `projects.json` (reads the AISB project database via `jq`), auto-creates `tmux new-session` + `claude --dangerously-skip-permissions` |
-| `~ clean RAM` | `drop_caches` + clear `/tmp/.maniac-*`, `/tmp/browser-screenshots/*`, `/tmp/.sm-*` |
-| `x kill all` | Kill every session except the current one |
+| `open project` | Pick a project from `projects.json`, auto-creates session + launches `claude --dangerously-skip-permissions` |
+| `clean cache` | `drop_caches` + clear `/tmp/.maniac-*`, `/tmp/browser-screenshots/*` (fast) |
+| `deep clean` | Heavy disk reclaim — npm/bun/pnpm/uv/pip/playwright/electron/journal/apt + project `.next/cache .turbo .eslintcache` (5–7 GB typical, never touches user data) |
+| `clean history` | Wipe kill log + protection state |
+| `kill all` | Kill every session except current |
 
 **Auto-protect:** sessions detected as `working` (Claude active with subagents, real tools running, or CPU > 15%) are automatically marked `§` protected. After 10 minutes of idle the protection is dropped. Manual `.` toggle overrides auto-protect.
 
@@ -87,15 +94,17 @@ Fullscreen fzf popup showing every tmux session, grouped by category, with live 
 
 ### Performance
 
-Built for low-latency opens — the entire detection pass runs in ~300ms for 8 sessions on a typical VPS, thanks to:
+~400 ms render for 17 sessions on a typical VPS. Optimisations stacked:
 
-- **Single `ps -eo pid,ppid,rss,pcpu,comm` snapshot** shared across all sessions (was ~200 forks per open, now 1)
-- **Single `tmux list-panes -a`** snapshot for all sessions (was N tmux calls in pass 1)
-- **Awk tree-walks** for RAM and Claude process detection (zero `ps --ppid`/`pgrep` recursion)
-- **CPU read from `/proc/stat`** instead of `top -bn1` (−250ms)
-- **Git branch read from `.git/HEAD`** directly (no `git` fork)
-- **Lazy `tmux capture-pane`** — only invoked in the ambiguous idle-vs-streaming fallback branch
-- **Integer math for `human_mb`** instead of `bc -l` fork
+- **Single `ps -eo` + `tmux list-panes -a`** snapshots shared across all sessions (was ~200 forks per open)
+- **Pre-aggregated panes count + path** (1 awk pass instead of 2 per session)
+- **All helpers use `$REPLY`** (no `$(func "$arg")` subshell — `project_key`, `project_role`, `oracle_idx`, `short_name`, `truncate_str/smart`, `human_time/mb`, `age_bar`)
+- **Bulk-loaded AISB progress** — single bash pass over `~/.aisb/state/*.progress.json` files, no per-session `jq` fork
+- **`read` instead of `cat`** for status / RAM files
+- **Bash arithmetic for visible char count** (no `awk length()` per line)
+- **CPU read from `/proc/stat`** instead of `top -bn1`
+- **Git branch from `.git/HEAD`** directly (no `git` fork)
+- **In-place reload on `§`** via `fzf reload(self --render $VIEW)+refresh-preview` — no popup flash, cursor preserved
 
 ### Session Navigator Shortcuts
 
