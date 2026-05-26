@@ -1215,7 +1215,7 @@ fi
     # have no tab but are detected by their literal text below.
     case "$CHOICE" in
         *$'\t'*) ;;  # session or historique entry — proceed
-        *'open project'*|*'clean cache'*|*'deep clean'*|*'clean history'*|*'kill all'*|*'new hermes'*|*'new claude'*|*'new codex'*|*'aisb terminal'*) ;;  # menu action
+        *'open project'*|*'clean cache'*|*'deep clean'*|*'clean history'*|*'kill all'*|*'new hermes'*|*'new gemini'*|*'new claude'*|*'new codex'*|*'new pi'*|*'aisb terminal'*) ;;  # menu action
         *) continue ;;  # header / blank / decorative
     esac
 
